@@ -70,6 +70,11 @@ def chat(req: ChatRequest):
     except ValueError as e:
         raise HTTPException(500, str(e))
 
+    # Inject current date for every call so relative dates resolve correctly
+    from datetime import datetime
+    today_str = datetime.now().strftime("%Y-%m-%d (%A)")
+    date_context = f"[System: Today is {today_str}. Resolve 'next Saturday' etc. to YYYY-MM-DD from this date.]\n"
+
     # Load context if event_id provided
     context = ""
     if req.event_id:
@@ -77,20 +82,49 @@ def chat(req: ChatRequest):
         if ev:
             context = f"\n[Current Event Context: {ev.model_dump_json()}]\n"
 
-    full_prompt = context + req.message
+    full_prompt = date_context + context + req.message
 
     try:
         result = agent(full_prompt)
-        # strands agent returns string or object with .message
-        if hasattr(result, "message"):
-            text = result.message
-            if isinstance(text, dict) and "content" in text:
-                # handle content blocks
-                text = str(text["content"])
+        # strands may return: AgentResult, string, or list of blocks like [{'text': ...}, {'reasoningContent': ...}]
+        if isinstance(result, list):
+            # join all text blocks
+            parts = []
+            for blk in result:
+                if isinstance(blk, dict) and "text" in blk:
+                    parts.append(blk["text"])
+            text = "\n".join(parts) if parts else str(result)
+        elif isinstance(result, dict) and "text" in result:
+            text = result["text"]
+        elif hasattr(result, "message"):
+            msg = result.message
+            if isinstance(msg, dict) and "content" in msg:
+                content = msg["content"]
+                if isinstance(content, list):
+                    parts = [c.get("text","") for c in content if isinstance(c, dict) and "text" in c]
+                    text = "\n".join(parts) if parts else str(content)
+                else:
+                    text = str(content)
+            elif isinstance(msg, list):
+                parts = [b.get("text","") for b in msg if isinstance(b, dict) and "text" in b]
+                text = "\n".join(parts) if parts else str(msg)
             else:
-                text = str(text)
+                text = str(msg)
+        elif hasattr(result, "content"):
+            text = str(result.content)
         else:
             text = str(result)
+            # strip python list representation like "[{'text': '...'}]" if present
+            if text.startswith("[{'text'"):
+                import re, ast
+                try:
+                    parsed = ast.literal_eval(text)
+                    if isinstance(parsed, list):
+                        parts = [p.get("text","") for p in parsed if isinstance(p, dict) and "text" in p]
+                        if parts:
+                            text = "\n".join(parts)
+                except:
+                    pass
     except Exception as e:
         raise HTTPException(500, f"Agent error: {e}")
 

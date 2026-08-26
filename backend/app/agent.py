@@ -11,8 +11,15 @@ from .tools import (
     send_announcement,
     get_registration_count,
 )
+from .tools.event_state import upsert_event
 
-SYSTEM_PROMPT = """You are CampusOps, an AI event operations agent.
+def _build_system_prompt():
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    weekday = datetime.now().strftime("%A")
+    return f"""You are CampusOps, an AI event operations agent.
+
+Today is {today} ({weekday}). Use this as the reference for all relative dates like "next Saturday" or "tomorrow". Always resolve to YYYY-MM-DD format based on TODAY.
 
 Your purpose is to perform operational work required to organize and monitor campus events.
 
@@ -32,14 +39,17 @@ Restrictions:
 - Do not execute unnecessary actions. Keep workflow tight.
 
 Workflow:
-1. Extract event info from user message.
+1. Extract event info from user message. Resolve date to YYYY-MM-DD using TODAY={today}.
 2. Call check_room_availability with date and capacity.
 3. Call draft_permission_email with org, title, date, room, headcount.
-4. After human approval, call create_registration_form and send_announcement.
-5. For status queries like "how many registered?", call get_registration_count.
+4. IMMEDIATELY after steps 2-3, call upsert_event to persist the event (include org, title, date, headcount, room).
+5. After human approval, call create_registration_form and send_announcement, then upsert_event again with form details.
+6. For status queries like "how many registered?", call get_registration_count.
 
 Be concise and action-oriented. Show tool outputs clearly.
 """
+
+SYSTEM_PROMPT = _build_system_prompt()
 
 def get_gemini_model():
     api_key = os.getenv("GEMINI_API_KEY")
@@ -63,6 +73,7 @@ def create_agent():
             create_registration_form,
             send_announcement,
             get_registration_count,
+            upsert_event,
         ]
     )
     return agent

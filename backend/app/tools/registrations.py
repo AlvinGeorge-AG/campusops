@@ -13,11 +13,11 @@ def get_registration_count(sheet_id: str) -> str:
     """
     mock_mode = os.getenv("MOCK_MODE", "false").lower() == "true"
 
-    if mock_mode or sheet_id.startswith("mock_"):
-        # return mock count for demo
+    # Treat any missing/invalid sheet as mock for demo — Forms API doesn't auto-create a linked Sheet
+    if not sheet_id or sheet_id.startswith("mock_") or sheet_id.startswith("sheet_"):
         import random
-        count = random.randint(18, 30) if "mock" in sheet_id else 23
-        return json.dumps({"sheet_id": sheet_id, "registrant_count": count, "mock": True})
+        count = random.randint(18, 30) if "mock" in sheet_id else 0
+        return json.dumps({"sheet_id": sheet_id, "registrant_count": count, "mock": True, "note": "Mock - link a response Sheet to count real registrations"})
 
     try:
         from ..google.auth import get_credentials
