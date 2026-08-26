@@ -1,0 +1,10 @@
+Room,Capacity,Available,Notes
+SDPK,60,TRUE,Seminar room - AC
+Media Hall,120,TRUE,Projector + Sound
+Fab Lab,40,TRUE,Lab access needed
+Internal Auditorium,350,TRUE,Main indoor auditorium
+External Auditorium,600,TRUE,Outdoor covered
+Elga,80,TRUE,Discussion room
+College Ground,2000,TRUE,Outdoor - weather dependent
+College Library,100,TRUE,Quiet - prior permission needed
+Amphitheater,500,TRUE,Open air

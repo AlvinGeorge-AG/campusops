@@ -57,7 +57,38 @@ def approve_event(event_id: str, body: ApproveRequest):
     if body.approved:
         ev.status = EventStatus.LIVE
         save_event(ev)
-        return {"message": "Approved. Agent can now create registration form and send announcement.", "event": ev}
+        # --- AUTO-RESUME: intelligently continue without manual /chat ---
+        try:
+            agent = get_agent()
+            from datetime import datetime
+            today_str = datetime.now().strftime("%Y-%m-%d (%A)")
+            resume_prompt = (
+                f"[System: Today is {today_str}. Human APPROVED event {ev.id}. "
+                f"Event context: {ev.model_dump_json()} "
+                f"Resume workflow: create registration form and send announcement. "
+                f"If form fields were previously specified, reuse them; otherwise use default fields (Name, Email, Class, Phone). "
+                f"Persist with upsert_event.]"
+            )
+            result = agent(resume_prompt)
+            # normalize agent response like chat does
+            if isinstance(result, list):
+                parts = [b.get("text","") for b in result if isinstance(b, dict) and "text" in b]
+                text = "\n".join(parts) if parts else str(result)
+            elif hasattr(result, "message"):
+                msg = result.message
+                text = str(msg)
+                if isinstance(msg, list):
+                    parts = [b.get("text","") for b in msg if isinstance(b, dict) and "text" in b]
+                    text = "\n".join(parts) if parts else text
+            else:
+                text = str(result)
+            latest = get_latest_event()
+            # also fetch updated event (upsert may have updated latest)
+            updated = get_event(event_id)
+            return {"message": "Approved and auto-resumed. " + text, "event": updated or latest, "agent_response": text}
+        except Exception as e:
+            # approval succeeded even if agent resume fails
+            return {"message": f"Approved but agent resume failed: {e}. Call POST /chat with event_id to retry.", "event": ev}
     else:
         ev.status = EventStatus.DRAFT
         save_event(ev)
@@ -131,6 +162,35 @@ def chat(req: ChatRequest):
     # Try to track latest event for response
     latest = get_latest_event()
     return ChatResponse(response=text, event_id=latest.id if latest else None, status=latest.status if latest else None)
+
+class FormCreateRequest(BaseModel):
+    fields: Optional[list] = None  # e.g. [{"title":"Phone","type":"text"}, {"title":"Year","type":"multiple_choice","options":["1st","2nd"]}]
+    description: Optional[str] = ""
+
+@app.post("/events/{event_id}/form")
+def create_form_direct(event_id: str, body: FormCreateRequest):
+    """Low-level deterministic form creation - frontend calls this with chip-selected fields (no LLM needed)."""
+    ev = get_event(event_id)
+    if not ev:
+        raise HTTPException(404, "Event not found")
+    if ev.status not in [EventStatus.LIVE, EventStatus.PENDING_APPROVAL, EventStatus.ROOM_IDENTIFIED]:
+        raise HTTPException(400, f"Event status {ev.status} not ready for form creation. Approve first.")
+    import json, os
+    from app.tools.forms import create_registration_form as _create_form
+    # Strands tool is wrapped; call underlying logic via direct import
+    # We invoke the tool's python function by calling it as regular function (tool decorator preserves callable)
+    fields_json = json.dumps(body.fields) if body.fields else ""
+    desc = body.description or f"Registration for {ev.title}"
+    result_json = _create_form(ev.title, ev.date, desc, fields_json)
+    result = json.loads(result_json)
+    if result.get("form_link"):
+        ev.form_id = result.get("form_id")
+        ev.form_link = result.get("form_link")
+        ev.sheet_id = result.get("sheet_id") or ev.sheet_id
+        ev.sheet_link = result.get("sheet_link") or result.get("responses_link") or ev.sheet_link
+        # keep status LIVE
+        save_event(ev)
+    return {"event": ev, "form_result": result}
 
 # Helper endpoint to create/update event manually (for testing)
 @app.post("/events")

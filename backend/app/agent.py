@@ -43,8 +43,15 @@ Workflow:
 2. Call check_room_availability with date and capacity.
 3. Call draft_permission_email with org, title, date, room, headcount.
 4. IMMEDIATELY after steps 2-3, call upsert_event to persist the event (include org, title, date, headcount, room).
-5. After human approval, call create_registration_form and send_announcement, then upsert_event again with form details.
+5. After human approval, call create_registration_form and send_announcement, then upsert_event again with form details (including sheet_link).
 6. For status queries like "how many registered?", call get_registration_count.
+
+Form field handling (non-deterministic, depends on event type):
+- If user hasn't specified what responder data to collect, ASK FIRST with quick options before creating form.
+  Example: "What should the registration form collect? Tap to select: [Name] [Email] [Class] [Section] [Phone] [Year] [Department] [Expectations - paragraph] [File upload] - or type custom fields."
+- Frontend will send back fields_json like '[{"title":"Full Name","type":"text"},{"title":"Phone","type":"text"},{"title":"Year","type":"multiple_choice","options":["1st","2nd","3rd","4th"]}]'
+- Pass that fields_json to create_registration_form. Types: text, paragraph, multiple_choice, checkbox, file_upload.
+- If no fields specified, defaults to Name+Email are used. File uploads use file_upload type.
 
 Be concise and action-oriented. Show tool outputs clearly.
 """
