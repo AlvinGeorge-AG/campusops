@@ -25,6 +25,7 @@ class Event(BaseModel):
     sheet_link: Optional[str] = None
     sheet_id: Optional[str] = None
     form_fields_json: Optional[str] = None  # JSON array of chosen fields for deterministic form creation
+    announcement_draft: Optional[str] = None  # preview announcement that authority reviews; reused after approval
     registrant_count: int = 0
     announcement_sent: bool = False
     reminder_sent: bool = False

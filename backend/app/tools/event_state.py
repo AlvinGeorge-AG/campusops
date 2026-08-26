@@ -4,7 +4,7 @@ from ..state import save_event, get_event, get_latest_event
 from ..models import Event, EventStatus
 
 @tool
-def upsert_event(org: str, title: str, date: str, expected_headcount: int, room: str = "", room_capacity: int = 0, form_id: str = "", form_link: str = "", sheet_id: str = "", sheet_link: str = "") -> str:
+def upsert_event(org: str, title: str, date: str, expected_headcount: int, room: str = "", room_capacity: int = 0, form_id: str = "", form_link: str = "", sheet_id: str = "", sheet_link: str = "", form_fields_json: str = "", announcement_draft: str = "") -> str:
     """
     Save or update the current event state. Call this after each major step to persist progress.
     Args:
@@ -18,6 +18,8 @@ def upsert_event(org: str, title: str, date: str, expected_headcount: int, room:
         form_link: Google Form link if created
         sheet_id: Sheet ID for responses
         sheet_link: Google Sheet URL for responses (production)
+        form_fields_json: JSON array of selected form fields (for 1-request flow)
+        announcement_draft: Preview announcement text that was sent for authority review
     Returns:
         JSON with saved event id and status.
     """
@@ -44,6 +46,10 @@ def upsert_event(org: str, title: str, date: str, expected_headcount: int, room:
         ev.sheet_id = sheet_id
     if sheet_link:
         ev.sheet_link = sheet_link
+    if form_fields_json:
+        ev.form_fields_json = form_fields_json
+    if announcement_draft:
+        ev.announcement_draft = announcement_draft
 
     # auto-status logic
     if room and not ev.status or ev.status == EventStatus.DRAFT:

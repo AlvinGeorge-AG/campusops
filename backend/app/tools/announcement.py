@@ -18,8 +18,24 @@ def send_announcement(event_title: str, event_date: str, room: str, registration
     mock_mode = os.getenv("MOCK_MODE", "false").lower() == "true"
     recipients = os.getenv("ANNOUNCEMENT_RECIPIENTS", "students@example.com")
 
-    subject = f"Announcement: {event_title} on {event_date} - Room {room}"
-    body = f"""Hello,
+    # Reuse announcement draft that was already approved by authority if available
+    reused = False
+    try:
+        from ..state import get_latest_event
+        _ev = get_latest_event()
+        if _ev and _ev.announcement_draft and "ANNOUNCEMENT PREVIEW" in _ev.announcement_draft:
+            # Reuse preview but inject the real registration_link
+            body = _ev.announcement_draft.replace("ANNOUNCEMENT PREVIEW (to be sent to students after approval):", "ANNOUNCEMENT (approved):")
+            if "Registration will open after approval" in body:
+                body = body.replace("Registration will open after approval - form link to be attached.", f"Register here: {registration_link}")
+            else:
+                body += f"\nRegister here: {registration_link}\n"
+            reused = True
+        else:
+            raise Exception("no draft")
+    except:
+        if not reused:
+            body = f"""Hello,
 
 We are excited to announce: {event_title}
 
@@ -31,6 +47,10 @@ Seats are limited. Please register soon.
 
 - CampusOps
 """
+
+    subject = f"Announcement: {event_title} on {event_date} - Room {room}"
+    if reused:
+        subject += " (pre-approved)"
 
     if mock_mode:
         return f"[MOCK] Announcement prepared for {recipients} | Subject: {subject} | Link: {registration_link}"

@@ -20,17 +20,46 @@ def draft_permission_email(organization: str, event_title: str, date: str, room:
     mock_mode = os.getenv("MOCK_MODE", "false").lower() == "true"
 
     subject = f"Permission Request — {organization} {event_title} on {date}"
+
+    # Generate announcement preview that authority can review - will be reused after approval (no regeneration)
+    announcement_preview = f"""ANNOUNCEMENT PREVIEW (to be sent to students after approval):
+---
+Hello,
+
+We are excited to announce: {event_title} by {organization}
+
+Date: {date}
+Venue: {room}
+Expected: {expected_headcount} students
+Registration will open after approval - form link to be attached.
+
+Seats are limited. Please register soon.
+- CampusOps
+---"""
+
     body = f"""Respected Sir/Madam,
 
 {organization} would like to conduct "{event_title}" on {date} in {room}.
 Expected headcount: {expected_headcount}
 Room capacity verified as suitable.
 
-Kindly grant permission for the same.
+{announcement_preview}
+
+Kindly grant permission for the same. Upon approval, the above announcement will be sent as-is to students.
 
 Regards,
 {organization} - CampusOps (auto-drafted, requires human approval)
 """
+
+    # Persist announcement draft for reuse so we don't regenerate
+    try:
+        from ..state import get_latest_event, save_event
+        _ev = get_latest_event()
+        if _ev:
+            _ev.announcement_draft = announcement_preview
+            save_event(_ev)
+    except:
+        pass
 
     if mock_mode:
         return f"[MOCK] Draft prepared for {faculty_email} | Subject: {subject} | Body preview: {body[:120]}... | Action: Human must review & send."

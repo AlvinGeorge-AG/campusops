@@ -1,6 +1,6 @@
 Room,Capacity,Available,Notes
 SDPK,60,TRUE,Seminar room - AC
-Media Hall,120,TRUE,Projector + Sound
+Media Hall,120,FALSE,Projector + Sound
 Fab Lab,40,TRUE,Lab access needed
 Internal Auditorium,350,TRUE,Main indoor auditorium
 External Auditorium,600,TRUE,Outdoor covered

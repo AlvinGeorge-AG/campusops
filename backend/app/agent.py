@@ -49,7 +49,7 @@ Workflow:
 Form field handling (non-deterministic, depends on event type):
 - If user hasn't specified what responder data to collect, ASK FIRST with quick options before creating form.
   Example: "What should the registration form collect? Tap to select: [Name] [Email] [Class] [Section] [Phone] [Year] [Department] [Expectations - paragraph] [File upload] - or type custom fields."
-- Frontend will send back fields_json like '[{"title":"Full Name","type":"text"},{"title":"Phone","type":"text"},{"title":"Year","type":"multiple_choice","options":["1st","2nd","3rd","4th"]}]'
+- Frontend will send back fields_json like '[{{"title": "Full Name", "type": "text"}}, {{"title": "Phone", "type": "text"}}]'
 - Pass that fields_json to create_registration_form. Types: text, paragraph, multiple_choice, checkbox, file_upload.
 - If no fields specified, defaults to Name+Email are used. File uploads use file_upload type.
 
