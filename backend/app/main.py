@@ -203,6 +203,46 @@ def chat(req: ChatRequest):
     latest = get_latest_event()
     return ChatResponse(response=text, event_id=latest.id if latest else None, status=latest.status if latest else None)
 
+@app.get("/events/{event_id}/registrations")
+def get_registrations(event_id: str):
+    """Live count without LLM - also auto-syncs Forms responses → Sheet so sheet_link stays live."""
+    ev = get_event(event_id)
+    if not ev:
+        raise HTTPException(404, "Event not found")
+    if not ev.form_id or ev.form_id.startswith("mock_"):
+        # still return stored count for mock forms
+        return {"event_id": event_id, "form_id": ev.form_id, "sheet_id": ev.sheet_id, "sheet_link": ev.sheet_link, "count": 0, "mock": True, "note": "Mock form - no live registrations"}
+    import json
+    from app.tools.registrations import get_registration_count, sync_responses_to_sheet
+    # Trigger sync first so sheet_link shows rows automatically
+    sync_res = {}
+    if ev.sheet_id and not ev.sheet_id.startswith("mock_") and not ev.sheet_id.startswith("sheet_"):
+        try:
+            sync_res = sync_responses_to_sheet(ev.form_id, ev.sheet_id)
+        except Exception as e:
+            sync_res = {"synced": False, "error": str(e)}
+    raw = get_registration_count(ev.sheet_id or "", ev.form_id or "")
+    data = json.loads(raw)
+    # also update stored count
+    try:
+        ev.registrant_count = int(data.get("registrant_count", 0) or 0)
+        save_event(ev)
+    except:
+        pass
+    return {"event_id": event_id, "form_id": ev.form_id, "form_link": ev.form_link, "sheet_id": ev.sheet_id, "sheet_link": ev.sheet_link, "count": data.get("registrant_count", 0), "source": data.get("source"), "sync": sync_res, "raw": data}
+
+@app.post("/events/{event_id}/sync")
+def sync_event(event_id: str):
+    """Force sync Forms responses → Sheet without LLM. Makes sheet_link show registrations."""
+    ev = get_event(event_id)
+    if not ev:
+        raise HTTPException(404, "Event not found")
+    if not ev.form_id or ev.form_id.startswith("mock_") or not ev.sheet_id or ev.sheet_id.startswith("mock_") or ev.sheet_id.startswith("sheet_"):
+        raise HTTPException(400, "Need real form_id and sheet_id - event was mock or sheet not created")
+    from app.tools.registrations import sync_responses_to_sheet
+    res = sync_responses_to_sheet(ev.form_id, ev.sheet_id)
+    return {"event_id": event_id, "sheet_link": ev.sheet_link, "sync": res}
+
 class FormCreateRequest(BaseModel):
     fields: Optional[list] = None  # e.g. [{"title":"Phone","type":"text"}, {"title":"Year","type":"multiple_choice","options":["1st","2nd"]}]
     description: Optional[str] = ""
