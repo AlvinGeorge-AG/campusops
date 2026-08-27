@@ -48,7 +48,8 @@ def upsert_event(org: str, title: str, date: str, expected_headcount: int, room:
         ev.sheet_link = sheet_link
     if form_fields_json:
         ev.form_fields_json = form_fields_json
-    if announcement_draft:
+    if announcement_draft and "ANNOUNCEMENT PREVIEW" in announcement_draft:
+        # only store real previews, not "Announcement sent to ..." confirmations
         ev.announcement_draft = announcement_draft
 
     # auto-status logic

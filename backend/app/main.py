@@ -9,8 +9,55 @@ load_dotenv()
 from .agent import get_agent
 from .state import save_event, get_event, list_events, get_latest_event, update_event
 from .models import Event, EventStatus
+import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="CampusOps Backend", version="0.1.0")
+
+# --- Optional poller: if POLLER_ENABLED=true, auto-sync Forms→Sheet every 60s without manual Link click ---
+_poller_task = None
+
+async def _poll_forms_loop():
+    await asyncio.sleep(10)
+    while True:
+        try:
+            if os.getenv("POLLER_ENABLED", "false").lower() != "true" or os.getenv("MOCK_MODE", "false").lower() == "true":
+                await asyncio.sleep(60)
+                continue
+            events = list_events()
+            for ev in events:
+                if ev.status != EventStatus.LIVE or not ev.form_id or ev.form_id.startswith("mock_") or not ev.sheet_id or ev.sheet_id.startswith("mock_") or ev.sheet_id.startswith("sheet_"):
+                    continue
+                try:
+                    from app.tools.registrations import sync_responses_to_sheet, get_registration_count
+                    import json
+                    sync_responses_to_sheet(ev.form_id, ev.sheet_id)
+                    raw = get_registration_count(ev.sheet_id, ev.form_id)
+                    data = json.loads(raw)
+                    cnt = int(data.get("registrant_count", 0) or 0)
+                    if cnt != ev.registrant_count:
+                        ev.registrant_count = cnt
+                        save_event(ev)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        await asyncio.sleep(60)
+
+@app.on_event("startup")
+async def start_poller():
+    global _poller_task
+    if os.getenv("POLLER_ENABLED", "false").lower() == "true":
+        _poller_task = asyncio.create_task(_poll_forms_loop())
+        logger.info("Poller enabled (60s)")
+
+@app.on_event("shutdown")
+async def stop_poller():
+    global _poller_task
+    if _poller_task:
+        _poller_task.cancel()
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,8 +70,16 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     message: str
     event_id: Optional[str] = None
-    fields: Optional[list] = None  # 1-request: collect form fields upfront e.g. [{"title":"Phone","type":"text"}]
+    fields: Optional[list] = None  # 1-request: form fields e.g. [{"title":"Phone","type":"text"}]
     description: Optional[str] = None
+    # Heart of 1-chat: collect all for high-quality letters upfront
+    start_time: Optional[str] = None  # e.g. 3:30 PM
+    end_time: Optional[str] = None  # e.g. 4:30 PM
+    speaker: Optional[str] = None
+    purpose: Optional[str] = None
+    chairperson: Optional[str] = None
+    staff_in_charge: Optional[str] = None
+    need_onfoot: Optional[bool] = None
 
 class ChatResponse(BaseModel):
     response: str
@@ -242,6 +297,18 @@ def sync_event(event_id: str):
     from app.tools.registrations import sync_responses_to_sheet
     res = sync_responses_to_sheet(ev.form_id, ev.sheet_id)
     return {"event_id": event_id, "sheet_link": ev.sheet_link, "sync": res}
+
+@app.post("/webhook/form-submit")
+def webhook_form_submit(event_id: str, form_id: str = ""):
+    """For true instant push: attach this URL as Apps Script onFormSubmit trigger. No polling delay."""
+    ev = get_event(event_id) if event_id else None
+    fid = form_id or (ev.form_id if ev else "")
+    sid = ev.sheet_id if ev else ""
+    if not fid or not sid or sid.startswith("mock_") or sid.startswith("sheet_"):
+        raise HTTPException(400, "Need real event with form_id+sheet_id")
+    from app.tools.registrations import sync_responses_to_sheet
+    res = sync_responses_to_sheet(fid, sid)
+    return {"synced": True, "event_id": event_id, "sync": res}
 
 class FormCreateRequest(BaseModel):
     fields: Optional[list] = None  # e.g. [{"title":"Phone","type":"text"}, {"title":"Year","type":"multiple_choice","options":["1st","2nd"]}]

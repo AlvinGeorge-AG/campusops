@@ -64,6 +64,7 @@ def check_room_availability(date: str, capacity: int) -> str:
                                     candidates.append({"room": room, "capacity": cap, "available": True})
                         if candidates:
                             best = sorted(candidates, key=lambda x: x["capacity"])[0]
+                            best["source"] = "live_sheet"
                             return json.dumps(best)
                     except:
                         continue
@@ -76,11 +77,11 @@ def check_room_availability(date: str, capacity: int) -> str:
     candidates = []
     for r in MOCK_ROOMS:
         if r["available"] and r["capacity"] >= capacity:
-            candidates.append(r)
+            candidates.append({**r, "source": "mock_fallback"})
 
     if not candidates:
         return json.dumps({"error": f"No available room for {capacity} on {date}. Try alternative date/capacity.", "available": False})
 
     # pick smallest room that fits
     best = sorted(candidates, key=lambda x: x["capacity"])[0]
-    return json.dumps({"room": best["room"], "capacity": best["capacity"], "available": True})
+    return json.dumps({"room": best["room"], "capacity": best["capacity"], "available": True, "source": best.get("source", "mock_fallback")})

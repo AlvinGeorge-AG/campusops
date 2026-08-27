@@ -16,9 +16,16 @@ class Event(BaseModel):
     org: str = ""
     title: str = ""
     date: str = ""  # YYYY-MM-DD
+    start_time: Optional[str] = None  # e.g. 3:30 PM
+    end_time: Optional[str] = None  # e.g. 4:30 PM
     expected_headcount: int = 0
     room: Optional[str] = None
     room_capacity: Optional[int] = None
+    speaker: Optional[str] = None  # e.g. Mr. Deepak Padmanabhan (Alumni)
+    purpose: Optional[str] = None  # detailed purpose for letter
+    chairperson: Optional[str] = None  # e.g. Arthana Sreekesh
+    staff_in_charge: Optional[str] = None  # e.g. Aysha Fymin Majeed
+    need_onfoot: bool = False  # whether on-foot publicity letter needed
     status: EventStatus = EventStatus.DRAFT
     form_id: Optional[str] = None
     form_link: Optional[str] = None
@@ -26,6 +33,9 @@ class Event(BaseModel):
     sheet_id: Optional[str] = None
     form_fields_json: Optional[str] = None  # JSON array of chosen fields for deterministic form creation
     announcement_draft: Optional[str] = None  # preview announcement that authority reviews; reused after approval
+    permission_letter: Optional[str] = None  # high-quality letter shown to club for edit/send
+    onfoot_letter: Optional[str] = None  # on-foot publicity letter if needed
+    email_draft: Optional[str] = None  # full email body shown to club (permission + attachments note)
     registrant_count: int = 0
     announcement_sent: bool = False
     reminder_sent: bool = False
