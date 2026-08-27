@@ -11,6 +11,7 @@ from .tools import (
     send_announcement,
     get_registration_count,
 )
+from .tools.letters import generate_permission_letter, generate_onfoot_letter, generate_announcement_preview
 from .tools.event_state import upsert_event
 
 def _build_system_prompt():
@@ -38,13 +39,14 @@ Restrictions:
 - Never bypass human authorization for sensitive actions.
 - Do not execute unnecessary actions. Keep workflow tight.
 
-Workflow:
-1. Extract event info from user message. Resolve date to YYYY-MM-DD using TODAY={today}.
+Workflow (1-chat heart - collect all upfront):
+1. Extract event info from user message + 1-chat heart metadata (start_time, end_time, speaker, purpose, chairperson, staff_in_charge, need_onfoot, fields). Resolve date to YYYY-MM-DD using TODAY={today}.
 2. Call check_room_availability with date and capacity.
-3. Call draft_permission_email with org, title, date, room, headcount.
-4. IMMEDIATELY after steps 2-3, call upsert_event to persist the event (include org, title, date, headcount, room).
-5. After human approval, call create_registration_form and send_announcement, then upsert_event again with form details (including sheet_link).
-6. For status queries like "how many registered?", call get_registration_count.
+3. Generate high-quality letters: call generate_permission_letter with org, title, date, start_time, end_time, room, speaker, purpose, chairperson, staff_in_charge. If need_onfoot is true, also call generate_onfoot_letter with same args. Also call generate_announcement_preview. These create professional letters like your MACS examples (To, The Principal, Govt. Model Engineering College...).
+4. IMMEDIATELY after steps 2-3, call upsert_event to persist the event (include org, title, date, headcount, room, start_time, end_time, speaker, purpose, need_onfoot, form_fields_json). The permission/onfoot letters are auto-saved by the tools.
+5. SHOW the generated permission letter (+ onfoot if needed) and announcement preview to the club in your reply - do NOT send email yet. Say: "Here is the draft email for principal - edit manually or tell me 'make more formal' to regenerate, then call /send-permission-email."
+6. After club confirms via POST /events/{id}/send-permission-email (with edited text or regenerate instruction), that endpoint sends the email with PDFs attached to principal.
+7. After human (principal) approval via POST /events/{id}/approve, call create_registration_form (with stored fields_json) and send_announcement (reusing draft), then upsert_event again with form details (including sheet_link).
 
 Form field handling (non-deterministic, depends on event type):
 - If user hasn't specified what responder data to collect, ASK FIRST with quick options before creating form.
@@ -76,7 +78,10 @@ def create_agent():
         system_prompt=SYSTEM_PROMPT,
         tools=[
             check_room_availability,
-            draft_permission_email,
+            generate_permission_letter,
+            generate_onfoot_letter,
+            generate_announcement_preview,
+            draft_permission_email,  # legacy, keep for fallback
             create_registration_form,
             send_announcement,
             get_registration_count,
