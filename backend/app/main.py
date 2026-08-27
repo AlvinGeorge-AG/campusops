@@ -288,17 +288,141 @@ def chat(req: ChatRequest):
     except Exception as e:
         raise HTTPException(500, f"Agent error: {e}")
 
-    # If fields were sent without event_id (first request), persist them to the newly created event
-    if req.fields and not req.event_id:
+    # Persist 1-chat heart metadata to newly created event (for send)
+    if not req.event_id:
         _latest = get_latest_event()
-        if _latest and not _latest.form_fields_json:
-            import json as _json2
-            _latest.form_fields_json = _json2.dumps(req.fields)
-            save_event(_latest)
+        if _latest:
+            needs_save = False
+            if req.fields and not _latest.form_fields_json:
+                _latest.form_fields_json = _json.dumps(req.fields)
+                needs_save = True
+            if req.start_time and not _latest.start_time:
+                _latest.start_time = req.start_time
+                needs_save = True
+            if req.end_time and not _latest.end_time:
+                _latest.end_time = req.end_time
+                needs_save = True
+            if req.speaker and not _latest.speaker:
+                _latest.speaker = req.speaker
+                needs_save = True
+            if req.purpose and not _latest.purpose:
+                _latest.purpose = req.purpose
+                needs_save = True
+            if req.chairperson and not _latest.chairperson:
+                _latest.chairperson = req.chairperson
+                needs_save = True
+            if req.staff_in_charge and not _latest.staff_in_charge:
+                _latest.staff_in_charge = req.staff_in_charge
+                needs_save = True
+            if req.need_onfoot is not None and not _latest.need_onfoot:
+                _latest.need_onfoot = bool(req.need_onfoot)
+                needs_save = True
+            if needs_save:
+                save_event(_latest)
 
-    # Try to track latest event for response
+    # Try to track latest event for response - include drafts so frontend can show/edit
     latest = get_latest_event()
-    return ChatResponse(response=text, event_id=latest.id if latest else None, status=latest.status if latest else None)
+    if latest:
+        # Build email draft preview for club to review (permission letter + onfoot note)
+        email_preview = latest.email_draft or latest.permission_letter or ""
+        return ChatResponse(
+            response=text,
+            event_id=latest.id,
+            status=latest.status,
+            permission_letter=latest.permission_letter,
+            onfoot_letter=latest.onfoot_letter,
+            announcement_draft=latest.announcement_draft,
+            email_draft=email_preview
+        )
+    return ChatResponse(response=text, event_id=None, status=None)
+
+@app.post("/events/{event_id}/send-permission-email")
+def send_permission_email(event_id: str, body: SendEmailRequest):
+    """Club has reviewed/edited the draft shown in /chat. This sends it to principal/staff with PDFs attached."""
+    ev = get_event(event_id)
+    if not ev:
+        raise HTTPException(404, "Event not found")
+    # Allow natural language regeneration via LLM
+    if body.regenerate_instruction:
+        try:
+            agent = get_agent()
+            prompt = f"[Event {ev.id} context: {ev.model_dump_json()}] Regenerate permission letter as per instruction: {body.regenerate_instruction}. Use generate_permission_letter and generate_onfoot_letter if needed, then upsert."
+            agent(prompt)
+            ev = get_event(event_id)  # reload after regeneration
+        except Exception as e:
+            raise HTTPException(500, f"Regeneration failed: {e}")
+    # Determine email body: prefer edited, else stored draft, else permission_letter
+    email_body = body.edited_email or ev.email_draft or ev.permission_letter or ""
+    if not email_body:
+        # Fallback: generate if not yet created
+        try:
+            agent = get_agent()
+            agent(f"[Event {ev.id}] Generate permission letter for {ev.org} {ev.title} on {ev.date} at {ev.room}. Use generate_permission_letter.")
+            ev = get_event(event_id)
+            email_body = ev.permission_letter or email_body
+        except:
+            pass
+    if not email_body:
+        raise HTTPException(400, "No email draft found. Create event via /chat first.")
+
+    # Build PDFs
+    import os, base64
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    from email.mime.application import MIMEApplication
+    from app.pdf import permission_letter_pdf, onfoot_letter_pdf, announcement_pdf
+    faculty_email = os.getenv("FACULTY_EMAIL", "principal@govtmec.ac.in")
+    # For testing, use same as announcement recipient if not set
+    subject = f"Request for permission to host \"{ev.title}\" - {ev.org}"
+    # Attach announcement preview note
+    full_body = email_body.strip()
+    if ev.announcement_draft and "ANNOUNCEMENT" not in full_body:
+        full_body += f"\n\n---\nAnnouncement preview (to be sent after approval):\n{ev.announcement_draft}\n"
+
+    mock_mode = os.getenv("MOCK_MODE", "false").lower() == "true"
+    if mock_mode:
+        return {"mock": True, "to": faculty_email, "subject": subject, "body_preview": full_body[:400], "event": ev, "note": "MOCK_MODE=true - email not sent. Set false to actually send with PDFs."}
+
+    try:
+        from app.google.auth import get_credentials
+        from googleapiclient.discovery import build
+        creds = get_credentials()
+        if not creds:
+            raise Exception("No credentials")
+        service = build("gmail", "v1", credentials=creds)
+        msg = MIMEMultipart()
+        msg["to"] = faculty_email
+        msg["subject"] = subject
+        msg.attach(MIMEText(full_body, "plain"))
+        # Attach permission letter PDF
+        if ev.permission_letter:
+            pdf_bytes = permission_letter_pdf(ev.permission_letter)
+            part = MIMEApplication(pdf_bytes, _subtype="pdf")
+            part.add_header("Content-Disposition", "attachment", filename=f"Permission_Letter_{ev.title.replace(' ', '_')}.pdf")
+            msg.attach(part)
+        # Attach on-foot letter PDF if needed
+        if ev.need_onfoot and ev.onfoot_letter:
+            pdf_bytes = onfoot_letter_pdf(ev.onfoot_letter)
+            part = MIMEApplication(pdf_bytes, _subtype="pdf")
+            part.add_header("Content-Disposition", "attachment", filename=f"OnFoot_Publicity_{ev.title.replace(' ', '_')}.pdf")
+            msg.attach(part)
+        # Attach announcement PDF
+        if ev.announcement_draft:
+            pdf_bytes = announcement_pdf(ev.announcement_draft)
+            part = MIMEApplication(pdf_bytes, _subtype="pdf")
+            part.add_header("Content-Disposition", "attachment", filename=f"Announcement_{ev.title.replace(' ', '_')}.pdf")
+            msg.attach(part)
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        sent = service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        # Update event status to reflect sent
+        ev.email_draft = full_body
+        ev.status = ev.status  # stay pending_approval until admin approves
+        save_event(ev)
+        return {"sent": True, "to": faculty_email, "message_id": sent["id"], "subject": subject, "event": ev}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, f"Failed to send email: {e}")
 
 @app.get("/events/{event_id}/registrations")
 def get_registrations(event_id: str):
