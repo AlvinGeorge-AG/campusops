@@ -351,33 +351,54 @@ def send_permission_email(event_id: str, body: SendEmailRequest):
             ev = get_event(event_id)  # reload after regeneration
         except Exception as e:
             raise HTTPException(500, f"Regeneration failed: {e}")
-    # Determine email body: prefer edited, else stored draft, else permission_letter
-    email_body = body.edited_email or ev.email_draft or ev.permission_letter or ""
-    if not email_body:
-        # Fallback: generate if not yet created
+    # Ensure permission/onfoot letters exist (generate on-the-fly if chat missed them)
+    if not ev.permission_letter:
         try:
-            agent = get_agent()
-            agent(f"[Event {ev.id}] Generate permission letter for {ev.org} {ev.title} on {ev.date} at {ev.room}. Use generate_permission_letter.")
+            from app.tools.letters import generate_permission_letter
+            generate_permission_letter(ev.org, ev.title, ev.date, ev.start_time or "3:30 PM", ev.end_time or "4:30 PM", ev.room or "SDPK", ev.speaker or "", ev.purpose or "", ev.chairperson or "", ev.staff_in_charge or "")
             ev = get_event(event_id)
-            email_body = ev.permission_letter or email_body
         except:
             pass
-    if not email_body:
-        raise HTTPException(400, "No email draft found. Create event via /chat first.")
+    if ev.need_onfoot and not ev.onfoot_letter:
+        try:
+            from app.tools.letters import generate_onfoot_letter
+            generate_onfoot_letter(ev.org, ev.title, ev.date, ev.start_time or "3:30 PM", ev.end_time or "4:30 PM", ev.room or "SDPK", ev.speaker or "", ev.purpose or "", ev.chairperson or "", ev.staff_in_charge or "")
+            ev = get_event(event_id)
+        except:
+            pass
+    # Determine email body: brief request, not full letter duplicate
+    if body.edited_email:
+        full_body = body.edited_email.strip()
+    else:
+        # Brief email referencing attached PDFs
+        onfoot_note = " Also attached is the on-foot publicity request letter." if ev.need_onfoot else ""
+        full_body = f"""Respected Sir/Madam,
+
+I hope you are well. On behalf of {ev.org}, I am writing to seek your kind permission to host "{ev.title}" on {ev.date} from {ev.start_time or '3:30 PM'} to {ev.end_time or '4:30 PM'} at {ev.room}.
+
+Details: Expected headcount {ev.expected_headcount}, Room capacity {ev.room_capacity or 'as per venue'}{', Speaker: ' + ev.speaker if ev.speaker else ''}.
+
+Please find attached the detailed permission letter (PDF){onfoot_note} Kindly review the PDFs at your convenience.
+
+We would be grateful for your approval. Thank you for your continued support.
+
+With regards,
+Chairperson {ev.org}
+{ev.chairperson or 'Arthana Sreekesh'}
+
+Staff In Charge {ev.org}
+{ev.staff_in_charge or 'Aysha Fymin Majeed'}
+"""
+        # If club edited via regenerate, that edited text was already handled above
 
     # Build PDFs
     import os, base64
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
     from email.mime.application import MIMEApplication
-    from app.pdf import permission_letter_pdf, onfoot_letter_pdf, announcement_pdf
+    from app.pdf import permission_letter_pdf, onfoot_letter_pdf
     faculty_email = os.getenv("FACULTY_EMAIL", "principal@govtmec.ac.in")
-    # For testing, use same as announcement recipient if not set
     subject = f"Request for permission to host \"{ev.title}\" - {ev.org}"
-    # Attach announcement preview note
-    full_body = email_body.strip()
-    if ev.announcement_draft and "ANNOUNCEMENT" not in full_body:
-        full_body += f"\n\n---\nAnnouncement preview (to be sent after approval):\n{ev.announcement_draft}\n"
 
     mock_mode = os.getenv("MOCK_MODE", "false").lower() == "true"
     if mock_mode:
@@ -394,23 +415,17 @@ def send_permission_email(event_id: str, body: SendEmailRequest):
         msg["to"] = faculty_email
         msg["subject"] = subject
         msg.attach(MIMEText(full_body, "plain"))
-        # Attach permission letter PDF
+        # Attach permission letter PDF (only this + onfoot, no announcement PDF)
         if ev.permission_letter:
             pdf_bytes = permission_letter_pdf(ev.permission_letter)
             part = MIMEApplication(pdf_bytes, _subtype="pdf")
             part.add_header("Content-Disposition", "attachment", filename=f"Permission_Letter_{ev.title.replace(' ', '_')}.pdf")
             msg.attach(part)
-        # Attach on-foot letter PDF if needed
+        # Attach on-foot letter PDF if needed (now guaranteed if need_onfoot)
         if ev.need_onfoot and ev.onfoot_letter:
             pdf_bytes = onfoot_letter_pdf(ev.onfoot_letter)
             part = MIMEApplication(pdf_bytes, _subtype="pdf")
             part.add_header("Content-Disposition", "attachment", filename=f"OnFoot_Publicity_{ev.title.replace(' ', '_')}.pdf")
-            msg.attach(part)
-        # Attach announcement PDF
-        if ev.announcement_draft:
-            pdf_bytes = announcement_pdf(ev.announcement_draft)
-            part = MIMEApplication(pdf_bytes, _subtype="pdf")
-            part.add_header("Content-Disposition", "attachment", filename=f"Announcement_{ev.title.replace(' ', '_')}.pdf")
             msg.attach(part)
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
         sent = service.users().messages().send(userId="me", body={"raw": raw}).execute()
@@ -463,18 +478,6 @@ def sync_event(event_id: str):
     from app.tools.registrations import sync_responses_to_sheet
     res = sync_responses_to_sheet(ev.form_id, ev.sheet_id)
     return {"event_id": event_id, "sheet_link": ev.sheet_link, "sync": res}
-
-@app.post("/webhook/form-submit")
-def webhook_form_submit(event_id: str, form_id: str = ""):
-    """For true instant push: attach this URL as Apps Script onFormSubmit trigger. No polling delay."""
-    ev = get_event(event_id) if event_id else None
-    fid = form_id or (ev.form_id if ev else "")
-    sid = ev.sheet_id if ev else ""
-    if not fid or not sid or sid.startswith("mock_") or sid.startswith("sheet_"):
-        raise HTTPException(400, "Need real event with form_id+sheet_id")
-    from app.tools.registrations import sync_responses_to_sheet
-    res = sync_responses_to_sheet(fid, sid)
-    return {"synced": True, "event_id": event_id, "sync": res}
 
 class FormCreateRequest(BaseModel):
     fields: Optional[list] = None  # e.g. [{"title":"Phone","type":"text"}, {"title":"Year","type":"multiple_choice","options":["1st","2nd"]}]

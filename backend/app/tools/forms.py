@@ -47,14 +47,28 @@ def create_registration_form(event_title: str, event_date: str, description: str
         except:
             pass
         # Build rich description: heading + venue/date/club + user description
+        # Fix leak: agent sometimes passes "Create Google Form for ..." as description - replace with real purpose
+        _desc = description.strip() if description else ""
+        _low = _desc.lower()
+        if _low.startswith("create google form") or _low.startswith("create a google form") or _low == "create google form for java workshop":
+            _desc = ""
+        # Prefer stored purpose from Event if passed desc is generic/empty
+        if not _desc:
+            try:
+                from ..state import get_latest_event as _get_ev2b
+                _evb = _get_ev2b()
+                if _evb and _evb.purpose and len(_evb.purpose.strip()) > 10:
+                    _desc = _evb.purpose.strip()
+            except:
+                pass
         detailed_desc = ""
         if org:
             detailed_desc += f"Organized by {org}  •  "
         if room:
             detailed_desc += f"Venue: {room}  •  "
         detailed_desc += f"Date: {event_date}\n\n"
-        if description:
-            detailed_desc += description.strip()
+        if _desc:
+            detailed_desc += _desc
         else:
             detailed_desc += f"Join us for {event_title}! Please fill the form to register."
         # Header image support (optional) - via Forms API imageItem
