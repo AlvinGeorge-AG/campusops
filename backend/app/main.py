@@ -85,6 +85,14 @@ class ChatResponse(BaseModel):
     response: str
     event_id: Optional[str] = None
     status: Optional[str] = None
+    permission_letter: Optional[str] = None
+    onfoot_letter: Optional[str] = None
+    announcement_draft: Optional[str] = None
+    email_draft: Optional[str] = None
+
+class SendEmailRequest(BaseModel):
+    edited_email: Optional[str] = None  # if club manually edited the email text
+    regenerate_instruction: Optional[str] = None  # natural language to LLM to regenerate, e.g. "make more formal"
 
 class ApproveRequest(BaseModel):
     approved: bool
@@ -175,29 +183,63 @@ def chat(req: ChatRequest):
     today_str = datetime.now().strftime("%Y-%m-%d (%A)")
     date_context = f"[System: Today is {today_str}. Resolve 'next Saturday' etc. to YYYY-MM-DD from this date.]\n"
 
-    # If fields provided in this 1-request, persist upfront so approval reuse works
-    if req.fields and req.event_id:
+    # 1-chat heart: persist all extra metadata upfront (time/speaker/purpose/onfoot etc)
+    import json as _json
+    # If this is a new event (no event_id), inject all 1-chat data into prompt so agent generates letters in one go
+    if not req.event_id:
+        extra_heart = []
+        if req.start_time or req.end_time:
+            extra_heart.append(f"Time: {req.start_time or '?'} to {req.end_time or '?'}")
+        if req.speaker:
+            extra_heart.append(f"Speaker: {req.speaker}")
+        if req.purpose:
+            extra_heart.append(f"Purpose: {req.purpose}")
+        if req.chairperson:
+            extra_heart.append(f"Chairperson: {req.chairperson}")
+        if req.staff_in_charge:
+            extra_heart.append(f"Staff In Charge: {req.staff_in_charge}")
+        if req.need_onfoot is not None:
+            extra_heart.append(f"Need on-foot publicity letter: {req.need_onfoot}")
+        if extra_heart:
+            date_context += f"\n[Event metadata for letter generation (1-chat heart): {'; '.join(extra_heart)} - use these for permission/onfoot letters.]\n"
+        if req.fields:
+            date_context += f"\n[Form fields upfront: {_json.dumps(req.fields)} - save via upsert_event form_fields_json and use for create_registration_form.]\n"
+        if req.description:
+            date_context += f"\n[User event description: {req.description}]\n"
+    else:
+        # Existing event: persist fields/metadata to event for later send
         _ev = get_event(req.event_id)
         if _ev:
-            import json as _json
-            _ev.form_fields_json = _json.dumps(req.fields)
+            if req.fields:
+                _ev.form_fields_json = _json.dumps(req.fields)
+            if req.start_time:
+                _ev.start_time = req.start_time
+            if req.end_time:
+                _ev.end_time = req.end_time
+            if req.speaker:
+                _ev.speaker = req.speaker
+            if req.purpose:
+                _ev.purpose = req.purpose
+            if req.chairperson:
+                _ev.chairperson = req.chairperson
+            if req.staff_in_charge:
+                _ev.staff_in_charge = req.staff_in_charge
+            if req.need_onfoot is not None:
+                _ev.need_onfoot = bool(req.need_onfoot)
+            if req.description:
+                _ev.purpose = req.description  # also store
             save_event(_ev)
-            # also refresh context that will be injected below
-    elif req.fields and not req.event_id:
-        # No event yet: stash fields to inject into prompt so agent's upsert captures them
-        import json as _json
-        context_fields = f"\n[User selected form fields upfront (1-request): {_json.dumps(req.fields)} - agent must pass this as fields_json to create_registration_form and also save via upsert_event form_fields_json.]\n"
-        date_context += context_fields
 
     # Load context if event_id provided
     context = ""
     if req.event_id:
         ev = get_event(req.event_id)
         if ev:
-            # inject stored fields if event already has them
             extra = ""
             if ev.form_fields_json and not req.fields:
-                extra = f"\n[Stored form fields for this event: {ev.form_fields_json}]\n"
+                extra += f"\n[Stored form fields: {ev.form_fields_json}]\n"
+            if ev.need_onfoot:
+                extra += f"\n[On-foot publicity required for this event]\n"
             context = f"\n[Current Event Context: {ev.model_dump_json()}]{extra}\n"
 
     full_prompt = date_context + context + req.message
