@@ -11,8 +11,27 @@ from .state import save_event, get_event, list_events, get_latest_event, update_
 from .models import Event, EventStatus
 import asyncio
 import logging
+import re
 
 logger = logging.getLogger(__name__)
+
+def _extract_title_from_message(msg: str) -> str:
+    """Heuristic: 'FOSS MEC wants to conduct a Java workshop for 50...' -> 'Java Workshop'"""
+    if not msg:
+        return ""
+    # Look for patterns like "a X workshop", "a X seminar", "a X talk"
+    m = re.search(r"(?:a|an)\s+([A-Za-z0-9 ]+?)\s+(workshop|seminar|talk|session|event|competition|hackathon)", msg, re.IGNORECASE)
+    if m:
+        title = f"{m.group(1).strip().title()} {m.group(2).title()}"
+        return title
+    # Fallback: take first 3-4 words after 'conduct'
+    m2 = re.search(r"conduct\s+(?:a\s+)?(.+?)\s+for\s+\d+", msg, re.IGNORECASE)
+    if m2:
+        cand = m2.group(1).strip()
+        # trim to 4 words max
+        cand = " ".join(cand.split()[:4])
+        return cand.title()
+    return ""
 
 app = FastAPI(title="CampusOps Backend", version="0.1.0")
 
@@ -185,8 +204,33 @@ def chat(req: ChatRequest):
 
     # 1-chat heart: persist all extra metadata upfront (time/speaker/purpose/onfoot etc)
     import json as _json
-    # If this is a new event (no event_id), inject all 1-chat data into prompt so agent generates letters in one go
+    # If this is a new event (no event_id), create a fresh Event row BEFORE agent so upsert doesn't overwrite old event
+    new_event_id = None
     if not req.event_id:
+        from app.models import Event as _Event
+        _new = _Event()
+        _new.ensure_id()
+        _new.status = EventStatus.DRAFT
+        # pre-seed 1-chat heart so even if agent fails, data isn't lost
+        if req.start_time:
+            _new.start_time = req.start_time
+        if req.end_time:
+            _new.end_time = req.end_time
+        if req.speaker:
+            _new.speaker = req.speaker
+        if req.purpose or req.description:
+            _new.purpose = req.purpose or req.description
+        if req.chairperson:
+            _new.chairperson = req.chairperson
+        if req.staff_in_charge:
+            _new.staff_in_charge = req.staff_in_charge
+        if req.need_onfoot is not None:
+            _new.need_onfoot = bool(req.need_onfoot)
+        if req.fields:
+            _new.form_fields_json = _json.dumps(req.fields)
+        save_event(_new)
+        new_event_id = _new.id
+        # Inject heart into prompt
         extra_heart = []
         if req.start_time or req.end_time:
             extra_heart.append(f"Time: {req.start_time or '?'} to {req.end_time or '?'}")
@@ -206,6 +250,8 @@ def chat(req: ChatRequest):
             date_context += f"\n[Form fields upfront: {_json.dumps(req.fields)} - save via upsert_event form_fields_json and use for create_registration_form.]\n"
         if req.description:
             date_context += f"\n[User event description: {req.description}]\n"
+        # Also tell agent the new event_id to use
+        date_context += f"\n[New event placeholder created with id={new_event_id} - upsert will update this id.]\n"
     else:
         # Existing event: persist fields/metadata to event for later send
         _ev = get_event(req.event_id)
@@ -289,47 +335,117 @@ def chat(req: ChatRequest):
         raise HTTPException(500, f"Agent error: {e}")
 
     # Persist 1-chat heart metadata to newly created event (for send)
-    if not req.event_id:
-        _latest = get_latest_event()
-        if _latest:
-            needs_save = False
-            if req.fields and not _latest.form_fields_json:
-                _latest.form_fields_json = _json.dumps(req.fields)
-                needs_save = True
-            if req.start_time and not _latest.start_time:
-                _latest.start_time = req.start_time
-                needs_save = True
-            if req.end_time and not _latest.end_time:
-                _latest.end_time = req.end_time
-                needs_save = True
-            if req.speaker and not _latest.speaker:
-                _latest.speaker = req.speaker
-                needs_save = True
-            if req.purpose and not _latest.purpose:
-                _latest.purpose = req.purpose
-                needs_save = True
-            if req.chairperson and not _latest.chairperson:
-                _latest.chairperson = req.chairperson
-                needs_save = True
-            if req.staff_in_charge and not _latest.staff_in_charge:
-                _latest.staff_in_charge = req.staff_in_charge
-                needs_save = True
-            if req.need_onfoot is not None and not _latest.need_onfoot:
-                _latest.need_onfoot = bool(req.need_onfoot)
-                needs_save = True
-            if needs_save:
-                save_event(_latest)
+    _latest_for_persist = get_latest_event()
+    if not req.event_id and _latest_for_persist:
+        _latest = _latest_for_persist
+        needs_save = False
+        if req.fields and not _latest.form_fields_json:
+            _latest.form_fields_json = _json.dumps(req.fields)
+            needs_save = True
+        if req.start_time and not _latest.start_time:
+            _latest.start_time = req.start_time
+            needs_save = True
+        if req.end_time and not _latest.end_time:
+            _latest.end_time = req.end_time
+            needs_save = True
+        if req.speaker and not _latest.speaker:
+            _latest.speaker = req.speaker
+            needs_save = True
+        if req.purpose and not _latest.purpose:
+            _latest.purpose = req.purpose
+            needs_save = True
+        if req.chairperson and not _latest.chairperson:
+            _latest.chairperson = req.chairperson
+            needs_save = True
+        if req.staff_in_charge and not _latest.staff_in_charge:
+            _latest.staff_in_charge = req.staff_in_charge
+            needs_save = True
+        if req.need_onfoot is not None and not _latest.need_onfoot:
+            _latest.need_onfoot = bool(req.need_onfoot)
+            needs_save = True
+        if needs_save:
+            save_event(_latest)
+        _latest_for_persist = get_latest_event()
+
+    # Fix title if agent used description as title (e.g. "Learn GIT..." instead of "GIT Workshop")
+    _title_fixed = False
+    _old_title = ""
+    _pre_latest = get_latest_event()
+    if _pre_latest and not req.event_id and _pre_latest.title:
+        _low = _pre_latest.title.lower()
+        if len(_pre_latest.title) > 35 or "powerfull" in _low or "simple" in _low or _low == (_pre_latest.purpose or "").lower():
+            extracted = _extract_title_from_message(req.message)
+            if extracted and extracted.lower() not in _low:
+                _old_title = _pre_latest.title
+                _pre_latest.title = extracted
+                save_event(_pre_latest)
+                _title_fixed = True
+
+    # Fallback: ensure high-quality letters exist even if agent didn't call tools (e.g. draft_permission_email instead)
+    latest_for_letters = get_latest_event()
+    if latest_for_letters and not req.event_id:
+        need_perm = not latest_for_letters.permission_letter
+        # If title was just fixed but letter still has old title, force regeneration
+        if _title_fixed and latest_for_letters.permission_letter and _old_title and _old_title in latest_for_letters.permission_letter:
+            need_perm = True
+        need_onfoot = bool(latest_for_letters.need_onfoot) and not latest_for_letters.onfoot_letter
+        need_ann = not latest_for_letters.announcement_draft
+        # Also regenerate announcement if title fixed and it contains old title
+        if _title_fixed and latest_for_letters.announcement_draft and _old_title and _old_title in latest_for_letters.announcement_draft:
+            need_ann = True
+        if need_perm or need_onfoot or need_ann:
+            try:
+                from app.tools.letters import generate_permission_letter, generate_onfoot_letter, generate_announcement_preview
+                if need_perm:
+                    generate_permission_letter(
+                        latest_for_letters.org or "FOSS MEC",
+                        latest_for_letters.title or "Workshop",
+                        latest_for_letters.date or "2026-08-31",
+                        latest_for_letters.start_time or req.start_time or "3:30 PM",
+                        latest_for_letters.end_time or req.end_time or "4:30 PM",
+                        latest_for_letters.room or "SDPK",
+                        latest_for_letters.speaker or req.speaker or "",
+                        latest_for_letters.purpose or req.purpose or req.description or "",
+                        latest_for_letters.chairperson or req.chairperson or "Arthana Sreekesh",
+                        latest_for_letters.staff_in_charge or req.staff_in_charge or "Aysha Fymin Majeed"
+                    )
+                if need_onfoot:
+                    generate_onfoot_letter(
+                        latest_for_letters.org or "FOSS MEC",
+                        latest_for_letters.title or "Workshop",
+                        latest_for_letters.date or "2026-08-31",
+                        latest_for_letters.start_time or req.start_time or "3:30 PM",
+                        latest_for_letters.end_time or req.end_time or "4:30 PM",
+                        latest_for_letters.room or "SDPK",
+                        latest_for_letters.speaker or req.speaker or "",
+                        latest_for_letters.purpose or req.purpose or req.description or "",
+                        latest_for_letters.chairperson or req.chairperson or "Arthana Sreekesh",
+                        latest_for_letters.staff_in_charge or req.staff_in_charge or "Aysha Fymin Majeed"
+                    )
+                if need_ann:
+                    generate_announcement_preview(
+                        latest_for_letters.org or "FOSS MEC",
+                        latest_for_letters.title or "Workshop",
+                        latest_for_letters.date or "2026-08-31",
+                        latest_for_letters.room or "SDPK",
+                        latest_for_letters.expected_headcount or 50,
+                        latest_for_letters.purpose or req.purpose or req.description or ""
+                    )
+            except Exception as le:
+                print(f"[chat] letter fallback failed: {le}")
 
     # Try to track latest event for response - include drafts so frontend can show/edit
     latest = get_latest_event()
     if latest:
-        # Build email draft preview for club to review (permission letter + onfoot note)
         email_preview = latest.email_draft or latest.permission_letter or ""
+        # If still empty, build a minimal preview for frontend
+        if not email_preview and latest.title:
+            email_preview = f"To,\nThe Principal,\nGovt. Model Engineering College,\nThrikkakara.\n\nSubject: Request for permission to host \"{latest.title}\"\n\nRespected Sir/Madam,\n\nI am writing to request permission to conduct \"{latest.title}\", organized by {latest.org}, on {latest.date} from {latest.start_time or '3:30 PM'} to {latest.end_time or '4:30 PM'} at {latest.room}.\n\n{latest.purpose or ''}\n\nThank you.\n\nWith regards,\nChairperson {latest.org}\n{latest.chairperson or 'Arthana Sreekesh'}"
         return ChatResponse(
             response=text,
             event_id=latest.id,
             status=latest.status,
-            permission_letter=latest.permission_letter,
+            permission_letter=latest.permission_letter or email_preview,
             onfoot_letter=latest.onfoot_letter,
             announcement_draft=latest.announcement_draft,
             email_draft=email_preview
@@ -366,17 +482,33 @@ def send_permission_email(event_id: str, body: SendEmailRequest):
             ev = get_event(event_id)
         except:
             pass
-    # Determine email body: brief request, not full letter duplicate
-    if body.edited_email:
-        full_body = body.edited_email.strip()
-    else:
-        # Brief email referencing attached PDFs
-        onfoot_note = " Also attached is the on-foot publicity request letter." if ev.need_onfoot else ""
-        full_body = f"""Respected Sir/Madam,
+    # If club edited the permission letter in textarea, that text is the LETTER (for PDF), not the email body
+    if body.edited_email and body.edited_email.strip() and body.edited_email.strip() != ev.permission_letter:
+        # Treat edited_email as edited permission letter content → save for PDF, email stays brief
+        ev.permission_letter = body.edited_email.strip()
+        save_event(ev)
+    # Brief email body always references PDFs, never duplicates full letter
+    onfoot_note = " Also attached is the on-foot publicity request letter." if ev.need_onfoot else ""
+    
+    # Build detailed event info for email
+    speaker_info = f"\nSpeaker: {ev.speaker}" if ev.speaker else ""
+    purpose_info = f"\nPurpose: {ev.purpose}" if ev.purpose else ""
+    headcount_info = f"Expected Headcount: {ev.expected_headcount}"
+    capacity_info = f"Room Capacity: {ev.room_capacity or 'as per venue'}"
+    time_info = f"Time: {ev.start_time or '3:30 PM'} to {ev.end_time or '4:30 PM'}"
+    venue_info = f"Venue: {ev.room}"
+    date_info = f"Date: {ev.date}"
+    
+    full_body = f"""Respected Sir/Madam,
 
-I hope you are well. On behalf of {ev.org}, I am writing to seek your kind permission to host "{ev.title}" on {ev.date} from {ev.start_time or '3:30 PM'} to {ev.end_time or '4:30 PM'} at {ev.room}.
+I hope you are well. On behalf of {ev.org}, I am writing to seek your kind permission to host "{ev.title}" on {ev.date}.
 
-Details: Expected headcount {ev.expected_headcount}, Room capacity {ev.room_capacity or 'as per venue'}{', Speaker: ' + ev.speaker if ev.speaker else ''}.
+Event Details:
+{date_info}
+{time_info}
+{venue_info}
+{headcount_info}
+{capacity_info}{speaker_info}{purpose_info}
 
 Please find attached the detailed permission letter (PDF){onfoot_note} Kindly review the PDFs at your convenience.
 
@@ -388,8 +520,10 @@ Chairperson {ev.org}
 
 Staff In Charge {ev.org}
 {ev.staff_in_charge or 'Aysha Fymin Majeed'}
+
+---
+This email was generated via CampusOps. For queries, contact {ev.chairperson or 'Arthana Sreekesh'} ({ev.staff_in_charge or 'Aysha Fymin Majeed'}) from {ev.org}.
 """
-        # If club edited via regenerate, that edited text was already handled above
 
     # Build PDFs
     import os, base64
@@ -479,6 +613,21 @@ def sync_event(event_id: str):
     res = sync_responses_to_sheet(ev.form_id, ev.sheet_id)
     return {"event_id": event_id, "sheet_link": ev.sheet_link, "sync": res}
 
+@app.post("/events/{event_id}/reset")
+def reset_event(event_id: str):
+    """Testing helper: reset event to pending_approval and clear form/sheet so you can re-test approve. No auth."""
+    ev = get_event(event_id)
+    if not ev:
+        raise HTTPException(404, "Event not found")
+    ev.status = EventStatus.PENDING_APPROVAL
+    ev.form_id = None
+    ev.form_link = None
+    ev.sheet_id = None
+    ev.sheet_link = None
+    ev.announcement_sent = False
+    save_event(ev)
+    return {"reset": True, "event": ev}
+
 class FormCreateRequest(BaseModel):
     fields: Optional[list] = None  # e.g. [{"title":"Phone","type":"text"}, {"title":"Year","type":"multiple_choice","options":["1st","2nd"]}]
     description: Optional[str] = ""
@@ -517,3 +666,81 @@ def create_event(ev: Event):
     ev.ensure_id()
     save_event(ev)
     return ev
+
+# Test endpoints for verification
+@app.post("/test/email")
+def test_email():
+    """Test endpoint to verify email draft creation with sample data."""
+    from app.tools.email import draft_permission_email
+    import json
+    
+    result = draft_permission_email(
+        organization="MACS",
+        event_title="Python Workshop",
+        date="2026-09-15",
+        room="LH-302",
+        expected_headcount=50,
+        start_time="3:30 PM",
+        end_time="5:00 PM",
+        speaker="Dr. John Doe (Alumni, Google)",
+        purpose="This workshop aims to introduce students to Python programming fundamentals and practical applications in data science.",
+        chairperson="Arthana Sreekesh",
+        staff_in_charge="Aysha Fymin Majeed"
+    )
+    return {"email_draft_result": result}
+
+@app.post("/test/form")
+def test_form():
+    """Test endpoint to verify form creation with file upload support."""
+    from app.tools.forms import create_registration_form
+    import json
+    
+    # Test with file_upload field
+    fields = [
+        {"title": "Full Name", "type": "text", "required": True},
+        {"title": "Email", "type": "text", "required": True},
+        {"title": "Phone", "type": "text", "required": False},
+        {"title": "Year", "type": "multiple_choice", "options": ["1st", "2nd", "3rd", "4th"], "required": True},
+        {"title": "Resume", "type": "file_upload", "required": False},
+        {"title": "Portfolio Link", "type": "text", "required": False}
+    ]
+    
+    result = create_registration_form(
+        event_title="Python Workshop",
+        event_date="2026-09-15",
+        description="Learn Python fundamentals and build real-world projects in this hands-on workshop.",
+        fields_json=json.dumps(fields)
+    )
+    return {"form_result": json.loads(result)}
+
+@app.post("/test/letter")
+def test_letter():
+    """Test endpoint to verify permission letter generation."""
+    from app.tools.letters import generate_permission_letter, generate_announcement_preview
+    
+    perm = generate_permission_letter(
+        organization="MACS",
+        event_title="Python Workshop",
+        date="2026-09-15",
+        start_time="3:30 PM",
+        end_time="5:00 PM",
+        room="LH-302",
+        speaker="Dr. John Doe (Alumni, Google)",
+        purpose="This workshop aims to introduce students to Python programming fundamentals and practical applications in data science.",
+        chairperson="Arthana Sreekesh",
+        staff_in_charge="Aysha Fymin Majeed"
+    )
+    
+    ann = generate_announcement_preview(
+        organization="MACS",
+        event_title="Python Workshop",
+        date="2026-09-15",
+        room="LH-302",
+        expected_headcount=50,
+        description="Learn Python fundamentals and build real-world projects in this hands-on workshop."
+    )
+    
+    return {
+        "permission_letter": perm,
+        "announcement_preview": ann
+    }

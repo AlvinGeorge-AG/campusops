@@ -4,7 +4,9 @@ from email.mime.text import MIMEText
 from strands import tool
 
 @tool
-def draft_permission_email(organization: str, event_title: str, date: str, room: str, expected_headcount: int) -> str:
+def draft_permission_email(organization: str, event_title: str, date: str, room: str, expected_headcount: int, 
+                           start_time: str = "", end_time: str = "", speaker: str = "", purpose: str = "",
+                           chairperson: str = "", staff_in_charge: str = "") -> str:
     """
     Prepare a permission request draft for faculty approval.
     Args:
@@ -13,6 +15,12 @@ def draft_permission_email(organization: str, event_title: str, date: str, room:
         date: Event date YYYY-MM-DD
         room: Room name e.g. LH-302
         expected_headcount: Expected attendees
+        start_time: Event start time e.g. 3:30 PM
+        end_time: Event end time e.g. 4:30 PM
+        speaker: Speaker name and details e.g. "Dr. John Doe (Alumni)"
+        purpose: Detailed purpose/description of the event
+        chairperson: Chairperson name for signature
+        staff_in_charge: Staff in charge name for signature
     Returns:
         Status string with draft id or mock message.
     """
@@ -30,25 +38,46 @@ We are excited to announce: {event_title} by {organization}
 
 Date: {date}
 Venue: {room}
+{f"Time: {start_time} - {end_time}" if start_time and end_time else ""}
 Expected: {expected_headcount} students
+{f"Speaker: {speaker}" if speaker else ""}
 Registration will open after approval - form link to be attached.
 
 Seats are limited. Please register soon.
 - CampusOps
 ---"""
 
+    # Build detailed email body
+    time_info = f"{start_time} to {end_time}" if start_time and end_time else "TBD"
+    speaker_info = f"\nSpeaker: {speaker}" if speaker else ""
+    purpose_info = f"\n\nPurpose:\n{purpose}" if purpose else ""
+    
     body = f"""Respected Sir/Madam,
 
-{organization} would like to conduct "{event_title}" on {date} in {room}.
-Expected headcount: {expected_headcount}
-Room capacity verified as suitable.
+I hope you are well. On behalf of {organization}, I am writing to seek your kind permission to host "{event_title}" on {date}.
+
+Event Details:
+Date: {date}
+Time: {time_info}
+Venue: {room}
+Expected Headcount: {expected_headcount}
+Room Capacity: Verified as suitable{speaker_info}{purpose_info}
 
 {announcement_preview}
 
-Kindly grant permission for the same. Upon approval, the above announcement will be sent as-is to students.
+Please find attached the detailed permission letter (PDF) for your review. Kindly grant permission for the same. Upon approval, the above announcement will be sent as-is to students.
 
-Regards,
-{organization} - CampusOps (auto-drafted, requires human approval)
+We would be grateful for your approval. Thank you for your continued support.
+
+With regards,
+Chairperson {organization}
+{chairperson or 'Arthana Sreekesh'}
+
+Staff In Charge {organization}
+{staff_in_charge or 'Aysha Fymin Majeed'}
+
+---
+This email was generated via CampusOps. For queries, contact {chairperson or 'Arthana Sreekesh'} ({staff_in_charge or 'Aysha Fymin Majeed'}) from {organization}.
 """
 
     # Persist announcement draft for reuse so we don't regenerate

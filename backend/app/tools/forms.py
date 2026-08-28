@@ -1,5 +1,30 @@
 import os
+import json as _json
 from strands import tool
+
+def _create_upload_folder(creds, event_title: str, event_date: str) -> str:
+    """Create a Google Drive folder for file uploads and return its link."""
+    try:
+        from googleapiclient.discovery import build
+        drive_service = build("drive", "v3", credentials=creds)
+        folder_name = f"{event_title} - File Uploads ({event_date})"
+        folder_metadata = {
+            "name": folder_name,
+            "mimeType": "application/vnd.google-apps.folder"
+        }
+        folder = drive_service.files().create(body=folder_metadata, fields="id,webViewLink").execute()
+        folder_id = folder.get("id")
+        folder_link = folder.get("webViewLink")
+        # Make folder accessible to anyone with link (editor access for uploads)
+        drive_service.permissions().create(
+            fileId=folder_id,
+            body={"type": "anyone", "role": "writer"},
+            fields="id"
+        ).execute()
+        return folder_link
+    except Exception as e:
+        print(f"[forms] Failed to create upload folder: {e}")
+        return ""
 
 @tool
 def create_registration_form(event_title: str, event_date: str, description: str, fields_json: str = "") -> str:
@@ -13,18 +38,19 @@ def create_registration_form(event_title: str, event_date: str, description: str
     Returns:
         JSON with form_link AND response sheet_link/sheet_id.
     """
-    import json
+    import json as _json
     mock_mode = os.getenv("MOCK_MODE", "false").lower() == "true"
 
     if mock_mode:
         fake_id = f"mock_form_{event_title.replace(' ', '_')}"
-        return json.dumps({
+        return _json.dumps({
             "form_id": fake_id,
             "form_link": f"https://docs.google.com/forms/d/{fake_id}/viewform",
             "sheet_id": f"mock_sheet_{fake_id}",
             "sheet_link": f"https://docs.google.com/spreadsheets/d/mock_sheet_{fake_id}",
             "responses_link": f"https://docs.google.com/spreadsheets/d/mock_sheet_{fake_id}",
-            "mock": True
+            "mock": True,
+            "upload_folder_link": ""
         })
 
     try:
@@ -46,6 +72,20 @@ def create_registration_form(event_title: str, event_date: str, description: str
                 room = _ev2.room or ""
         except:
             pass
+        
+        # Check if any field is file_upload type - create Drive folder for uploads
+        upload_folder_link = ""
+        has_file_upload = False
+        if fields_json:
+            try:
+                _temp_fields = _json.loads(fields_json)
+                if isinstance(_temp_fields, str):
+                    _temp_fields = _json.loads(_temp_fields)
+                has_file_upload = any(f.get("type", "").lower() == "file_upload" for f in _temp_fields)
+            except Exception as e:
+                pass
+        if has_file_upload:
+            upload_folder_link = _create_upload_folder(creds, event_title, event_date)
         # Build rich description: heading + venue/date/club + user description
         # Fix leak: agent sometimes passes "Create Google Form for ..." as description - replace with real purpose
         _desc = description.strip() if description else ""
@@ -61,16 +101,45 @@ def create_registration_form(event_title: str, event_date: str, description: str
                     _desc = _evb.purpose.strip()
             except:
                 pass
+        
+        # Get additional event metadata for richer description
+        speaker = ""
+        start_time = ""
+        end_time = ""
+        expected_headcount = 0
+        try:
+            from ..state import get_latest_event as _get_ev3
+            _ev3 = _get_ev3()
+            if _ev3:
+                speaker = _ev3.speaker or ""
+                start_time = _ev3.start_time or ""
+                end_time = _ev3.end_time or ""
+                expected_headcount = _ev3.expected_headcount or 0
+        except:
+            pass
+        
         detailed_desc = ""
         if org:
-            detailed_desc += f"Organized by {org}  •  "
+            detailed_desc += f"📋 Organized by: {org}  •  "
         if room:
-            detailed_desc += f"Venue: {room}  •  "
-        detailed_desc += f"Date: {event_date}\n\n"
+            detailed_desc += f"📍 Venue: {room}  •  "
+        detailed_desc += f"📅 Date: {event_date}"
+        if start_time and end_time:
+            detailed_desc += f"\n⏰ Time: {start_time} - {end_time}"
+        detailed_desc += "\n\n"
+        if speaker:
+            detailed_desc += f"🎤 Speaker: {speaker}\n\n"
+        if expected_headcount:
+            detailed_desc += f"👥 Expected Attendees: {expected_headcount}\n\n"
         if _desc:
-            detailed_desc += _desc
+            detailed_desc += f"📝 About the Event:\n{_desc}\n\n"
         else:
-            detailed_desc += f"Join us for {event_title}! Please fill the form to register."
+            detailed_desc += f"Join us for {event_title}! Please fill the form to register.\n\n"
+        detailed_desc += "⚠️ Seats are limited. Registration will close once capacity is reached.\n"
+        detailed_desc += "📩 Confirmation details will be sent via email after submission."
+        # Add file upload instructions if needed
+        if upload_folder_link:
+            detailed_desc += f"\n\n📎 File Uploads:\nFor any file upload fields, please upload your files to this Google Drive folder and paste the shareable link in the form:\n{upload_folder_link}\n\nMake sure the link is set to 'Anyone with the link can view' for our team to access it."
         # Header image support (optional) - via Forms API imageItem
         header_image_url = os.getenv("FORM_HEADER_IMAGE_URL", "").strip()  # set in .env if you want banner pic
         # Convert Drive "file/d/ID/view" link to direct "uc?id=ID" that Forms API can fetch
@@ -103,7 +172,6 @@ def create_registration_form(event_title: str, event_date: str, description: str
             print(f"[forms] updateFormInfo failed (ignored): {de}")
 
         # Build dynamic questions from fields_json or defaults
-        import json as _json
         fields = []
         if fields_json:
             try:
@@ -129,7 +197,12 @@ def create_registration_form(event_title: str, event_date: str, description: str
                     "options": [{"value": o} for o in (options or ["Option 1"])],
                 }
             elif ftype == "file_upload":
-                q["fileUploadQuestion"] = {"maxFiles": 1, "maxFileSize": "10MB"}
+                # Forms API doesn't support file_upload via batchUpdate - use text field for Drive link
+                q["textQuestion"] = {}
+                if upload_folder_link:
+                    title = f"{title} (paste Google Drive file link here)"
+                else:
+                    title = f"{title} (upload to Drive and paste link)"
             else:  # text, email, phone, class, section etc.
                 q["textQuestion"] = {}
             return {
@@ -211,13 +284,14 @@ def create_registration_form(event_title: str, event_date: str, description: str
             # sheet creation is bonus; form still succeeds
             pass
 
-        return json.dumps({
+        return _json.dumps({
             "form_id": form_id,
             "form_link": form_link,
             "sheet_id": sheet_id,
             "sheet_link": sheet_link,
             "responses_link": sheet_link,
-            "description": description
+            "description": description,
+            "upload_folder_link": upload_folder_link
         })
     except Exception as e:
         # Surface real error in uvicorn logs so we can debug (don't hide)
@@ -225,12 +299,13 @@ def create_registration_form(event_title: str, event_date: str, description: str
         print(f"[forms] CREATE FAILED: {e}")
         traceback.print_exc()
         fake_id = f"mock_form_{event_title.replace(' ', '_')}"
-        return json.dumps({
+        return _json.dumps({
             "form_id": fake_id,
             "form_link": f"https://docs.google.com/forms/d/{fake_id}/viewform",
             "sheet_id": f"mock_sheet_{fake_id}",
             "sheet_link": f"https://docs.google.com/spreadsheets/d/mock_sheet_{fake_id}",
             "responses_link": f"https://docs.google.com/spreadsheets/d/mock_sheet_{fake_id}",
             "mock": True,
-            "error": str(e)
+            "error": str(e),
+            "upload_folder_link": ""
         })
