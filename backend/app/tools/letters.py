@@ -1,56 +1,57 @@
 import os
 from strands import tool
+from ..config import INSTITUTION_NAME, INSTITUTION_PLACE, DEFAULT_CHAIRPERSON, DEFAULT_STAFF
 
 # High-quality templates based on real MACS letters provided by user
-PERMISSION_TEMPLATE = """To,
+PERMISSION_TEMPLATE = f"""To,
 The Principal,
-Govt. Model Engineering College,
-Thrikkakara.
+{INSTITUTION_NAME},
+{INSTITUTION_PLACE}.
 
-Subject: Request for permission to host "{title}"
+Subject: Request for permission to host "{{title}}"
 
 Respected Sir/Madam,
 
-I am writing to request permission to conduct "{title}", organized by {org}, on {date} from {start} to {end} at {room}.
-{speaker_line}
-{purpose_line}
-{speaker_para}
+I am writing to request permission to conduct "{{title}}", organized by {{org}}, on {{date}} from {{start}} to {{end}} at {{room}}.
+{{speaker_line}}
+{{purpose_line}}
+{{speaker_para}}
 
 We appreciate your consideration of this request and thank you for your continued support.
 Thank you.
 
 With regards,
-Chairperson {org}
-{chairperson}
+Chairperson {{org}}
+{{chairperson}}
 
-Staff In Charge {org}
-{staff}
+Staff In Charge {{org}}
+{{staff}}
 """
 
-ONFOOT_TEMPLATE = """To,
+ONFOOT_TEMPLATE = f"""To,
 The Principal,
-Govt. Model Engineering College,
-Thrikkakara.
+{INSTITUTION_NAME},
+{INSTITUTION_PLACE}.
 
-Subject: Request for On-foot Publicity for "{title}"
+Subject: Request for On-foot Publicity for "{{title}}"
 
 Respected Sir/Madam,
 
-I am writing to request permission to conduct on-foot publicity for the "{title}", organized by {org}, scheduled for {date} from {start} to {end} at {room}.
-{speaker_line}
-{purpose_line}
-{speaker_para}
+I am writing to request permission to conduct on-foot publicity for the "{{title}}", organized by {{org}}, scheduled for {{date}} from {{start}} to {{end}} at {{room}}.
+{{speaker_line}}
+{{purpose_line}}
+{{speaker_para}}
 We request permission to carry out on-foot publicity within the campus to effectively inform and encourage students to participate in this valuable session.
 
 We sincerely appreciate your consideration of this request and thank you for your continued support.
 Thank you.
 
 With regards,
-Chairperson {org}
-{chairperson}
+Chairperson {{org}}
+{{chairperson}}
 
-Staff In Charge {org}
-{staff}
+Staff In Charge {{org}}
+{{staff}}
 """
 
 def _build_letters(org, title, date, start, end, room, speaker, purpose, chairperson, staff):
@@ -65,8 +66,8 @@ def _build_letters(org, title, date, start, end, room, speaker, purpose, chairpe
         speaker_para = f"The session will feature {speaker}, who will share experiences and valuable insights with students, providing practical guidance and inspiration as they prepare for their own academic and professional careers."
     else:
         speaker_para = ""
-    chairperson = chairperson or "Arthana Sreekesh"
-    staff = staff or "Aysha Fymin Majeed"
+    chairperson = chairperson or DEFAULT_CHAIRPERSON
+    staff = staff or DEFAULT_STAFF
     perm = PERMISSION_TEMPLATE.format(title=title, org=org, date=date, start=start, end=end, room=room, speaker_line=speaker_line, purpose_line=purpose_line, speaker_para=speaker_para, chairperson=chairperson, staff=staff)
     onfoot = ONFOOT_TEMPLATE.format(title=title, org=org, date=date, start=start, end=end, room=room, speaker_line=speaker_line, purpose_line=purpose_line, speaker_para=speaker_para, chairperson=chairperson, staff=staff)
     return perm.strip(), onfoot.strip()

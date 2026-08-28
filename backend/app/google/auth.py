@@ -2,19 +2,12 @@ import os
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
-
-SCOPES = [
-    "https://www.googleapis.com/auth/gmail.compose",
-    "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/forms.body",
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.file",
-]
+from ..config import GOOGLE_CREDENTIALS_PATH, GOOGLE_TOKEN_PATH, SCOPES
 
 def get_credentials():
     creds = None
-    token_path = os.getenv("GOOGLE_TOKEN_PATH", "token.json")
-    creds_path = os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json")
+    token_path = GOOGLE_TOKEN_PATH
+    creds_path = GOOGLE_CREDENTIALS_PATH
 
     if os.path.exists(token_path):
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)

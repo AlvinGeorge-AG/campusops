@@ -1,6 +1,9 @@
 import os
 import json as _json
+import logging
 from strands import tool
+
+logger = logging.getLogger(__name__)
 
 def _create_upload_folder(creds, event_title: str, event_date: str) -> str:
     """Create a Google Drive folder for file uploads and return its link."""
@@ -23,7 +26,7 @@ def _create_upload_folder(creds, event_title: str, event_date: str) -> str:
         ).execute()
         return folder_link
     except Exception as e:
-        print(f"[forms] Failed to create upload folder: {e}")
+        logger.error("Failed to create upload folder: %s", e)
         return ""
 
 @tool
@@ -63,7 +66,6 @@ def create_registration_form(event_title: str, event_date: str, description: str
         # Resolve org/room for detailed heading from latest event
         org = ""
         room = ""
-        venue_note = ""
         try:
             from ..state import get_latest_event as _get_ev
             _ev2 = _get_ev()
@@ -169,7 +171,7 @@ def create_registration_form(event_title: str, event_date: str, description: str
                 }]
             }).execute()
         except Exception as de:
-            print(f"[forms] updateFormInfo failed (ignored): {de}")
+            logger.warning("updateFormInfo failed (ignored): %s", de)
 
         # Build dynamic questions from fields_json or defaults
         fields = []
@@ -250,7 +252,7 @@ def create_registration_form(event_title: str, event_date: str, description: str
                     }).execute()
             except Exception as ie:
                 # Image failed, but form is already created - just log, don't mock
-                print(f"[forms] header image failed (ignored): {ie}")
+                logger.warning("header image failed (ignored): %s", ie)
 
         form_link = f"https://docs.google.com/forms/d/{form_id}/viewform"
 
@@ -296,8 +298,7 @@ def create_registration_form(event_title: str, event_date: str, description: str
     except Exception as e:
         # Surface real error in uvicorn logs so we can debug (don't hide)
         import traceback
-        print(f"[forms] CREATE FAILED: {e}")
-        traceback.print_exc()
+        logger.exception("CREATE FAILED: %s", e)
         fake_id = f"mock_form_{event_title.replace(' ', '_')}"
         return _json.dumps({
             "form_id": fake_id,

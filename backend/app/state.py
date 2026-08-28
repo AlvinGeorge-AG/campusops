@@ -1,10 +1,8 @@
 import sqlite3
 import json
-import os
 from typing import Optional, List
 from .models import Event, EventStatus
-
-DB_PATH = os.getenv("DB_PATH", "events.db")
+from .config import DB_PATH
 
 CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS events (

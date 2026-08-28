@@ -2,6 +2,7 @@ import os
 import base64
 from email.mime.text import MIMEText
 from strands import tool
+from ..config import FACULTY_EMAIL, DEFAULT_CHAIRPERSON, DEFAULT_STAFF, MOCK_MODE
 
 @tool
 def draft_permission_email(organization: str, event_title: str, date: str, room: str, expected_headcount: int, 
@@ -24,8 +25,8 @@ def draft_permission_email(organization: str, event_title: str, date: str, room:
     Returns:
         Status string with draft id or mock message.
     """
-    faculty_email = os.getenv("FACULTY_EMAIL", "faculty@example.com")
-    mock_mode = os.getenv("MOCK_MODE", "false").lower() == "true"
+    faculty_email = FACULTY_EMAIL
+    mock_mode = MOCK_MODE
 
     subject = f"Permission Request — {organization} {event_title} on {date}"
 
@@ -71,13 +72,13 @@ We would be grateful for your approval. Thank you for your continued support.
 
 With regards,
 Chairperson {organization}
-{chairperson or 'Arthana Sreekesh'}
+{chairperson or DEFAULT_CHAIRPERSON}
 
 Staff In Charge {organization}
-{staff_in_charge or 'Aysha Fymin Majeed'}
+{staff_in_charge or DEFAULT_STAFF}
 
 ---
-This email was generated via CampusOps. For queries, contact {chairperson or 'Arthana Sreekesh'} ({staff_in_charge or 'Aysha Fymin Majeed'}) from {organization}.
+This email was generated via CampusOps. For queries, contact {chairperson or DEFAULT_CHAIRPERSON} ({staff_in_charge or DEFAULT_STAFF}) from {organization}.
 """
 
     # Persist announcement draft for reuse so we don't regenerate

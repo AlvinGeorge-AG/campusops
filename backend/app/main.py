@@ -1,18 +1,28 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional
 import os
 from dotenv import load_dotenv
 load_dotenv()
 
 from .agent import get_agent
-from .state import save_event, get_event, list_events, get_latest_event, update_event
+from .state import save_event, get_event, list_events, get_latest_event
 from .models import Event, EventStatus
+from .config import (
+    MOCK_MODE, POLLER_ENABLED, FACULTY_EMAIL, 
+    DEFAULT_CHAIRPERSON, DEFAULT_STAFF, INSTITUTION_NAME, INSTITUTION_PLACE
+)
 import asyncio
 import logging
 import re
 
+# Structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
 logger = logging.getLogger(__name__)
 
 def _extract_title_from_message(msg: str) -> str:
@@ -35,6 +45,18 @@ def _extract_title_from_message(msg: str) -> str:
 
 app = FastAPI(title="CampusOps Backend", version="0.1.0")
 
+# Global exception handler
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled error: %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Internal server error", "detail": str(exc)}
+    )
+
 # --- Optional poller: if POLLER_ENABLED=true, auto-sync Forms→Sheet every 60s without manual Link click ---
 _poller_task = None
 
@@ -42,7 +64,7 @@ async def _poll_forms_loop():
     await asyncio.sleep(10)
     while True:
         try:
-            if os.getenv("POLLER_ENABLED", "false").lower() != "true" or os.getenv("MOCK_MODE", "false").lower() == "true":
+            if not POLLER_ENABLED or MOCK_MODE:
                 await asyncio.sleep(60)
                 continue
             events = list_events()
@@ -68,7 +90,7 @@ async def _poll_forms_loop():
 @app.on_event("startup")
 async def start_poller():
     global _poller_task
-    if os.getenv("POLLER_ENABLED", "false").lower() == "true":
+    if POLLER_ENABLED:
         _poller_task = asyncio.create_task(_poll_forms_loop())
         logger.info("Poller enabled (60s)")
 
@@ -100,6 +122,13 @@ class ChatRequest(BaseModel):
     staff_in_charge: Optional[str] = None
     need_onfoot: Optional[bool] = None
 
+    @field_validator("message")
+    @classmethod
+    def message_not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("message must not be empty")
+        return v.strip()
+
 class ChatResponse(BaseModel):
     response: str
     event_id: Optional[str] = None
@@ -118,7 +147,7 @@ class ApproveRequest(BaseModel):
 
 @app.get("/")
 def health():
-    return {"status": "ok", "service": "CampusOps Backend", "mock_mode": os.getenv("MOCK_MODE", "false")}
+    return {"status": "ok", "service": "CampusOps Backend", "mock_mode": MOCK_MODE}
 
 @app.get("/events")
 def get_events():
@@ -432,7 +461,7 @@ def chat(req: ChatRequest):
                         latest_for_letters.purpose or req.purpose or req.description or ""
                     )
             except Exception as le:
-                print(f"[chat] letter fallback failed: {le}")
+                logger.warning("letter fallback failed: %s", le)
 
     # Try to track latest event for response - include drafts so frontend can show/edit
     latest = get_latest_event()
@@ -440,7 +469,7 @@ def chat(req: ChatRequest):
         email_preview = latest.email_draft or latest.permission_letter or ""
         # If still empty, build a minimal preview for frontend
         if not email_preview and latest.title:
-            email_preview = f"To,\nThe Principal,\nGovt. Model Engineering College,\nThrikkakara.\n\nSubject: Request for permission to host \"{latest.title}\"\n\nRespected Sir/Madam,\n\nI am writing to request permission to conduct \"{latest.title}\", organized by {latest.org}, on {latest.date} from {latest.start_time or '3:30 PM'} to {latest.end_time or '4:30 PM'} at {latest.room}.\n\n{latest.purpose or ''}\n\nThank you.\n\nWith regards,\nChairperson {latest.org}\n{latest.chairperson or 'Arthana Sreekesh'}"
+            email_preview = f"To,\nThe Principal,\n{INSTITUTION_NAME},\n{INSTITUTION_PLACE}.\n\nSubject: Request for permission to host \"{latest.title}\"\n\nRespected Sir/Madam,\n\nI am writing to request permission to conduct \"{latest.title}\", organized by {latest.org}, on {latest.date} from {latest.start_time or '3:30 PM'} to {latest.end_time or '4:30 PM'} at {latest.room}.\n\n{latest.purpose or ''}\n\nThank you.\n\nWith regards,\nChairperson {latest.org}\n{latest.chairperson or DEFAULT_CHAIRPERSON}"
         return ChatResponse(
             response=text,
             event_id=latest.id,
@@ -516,13 +545,13 @@ We would be grateful for your approval. Thank you for your continued support.
 
 With regards,
 Chairperson {ev.org}
-{ev.chairperson or 'Arthana Sreekesh'}
+{ev.chairperson or DEFAULT_CHAIRPERSON}
 
 Staff In Charge {ev.org}
-{ev.staff_in_charge or 'Aysha Fymin Majeed'}
+{ev.staff_in_charge or DEFAULT_STAFF}
 
 ---
-This email was generated via CampusOps. For queries, contact {ev.chairperson or 'Arthana Sreekesh'} ({ev.staff_in_charge or 'Aysha Fymin Majeed'}) from {ev.org}.
+This email was generated via CampusOps. For queries, contact {ev.chairperson or DEFAULT_CHAIRPERSON} ({ev.staff_in_charge or DEFAULT_STAFF}) from {ev.org}.
 """
 
     # Build PDFs
@@ -531,10 +560,10 @@ This email was generated via CampusOps. For queries, contact {ev.chairperson or 
     from email.mime.text import MIMEText
     from email.mime.application import MIMEApplication
     from app.pdf import permission_letter_pdf, onfoot_letter_pdf
-    faculty_email = os.getenv("FACULTY_EMAIL", "principal@govtmec.ac.in")
+    faculty_email = FACULTY_EMAIL
     subject = f"Request for permission to host \"{ev.title}\" - {ev.org}"
 
-    mock_mode = os.getenv("MOCK_MODE", "false").lower() == "true"
+    mock_mode = MOCK_MODE
     if mock_mode:
         return {"mock": True, "to": faculty_email, "subject": subject, "body_preview": full_body[:400], "event": ev, "note": "MOCK_MODE=true - email not sent. Set false to actually send with PDFs."}
 
@@ -666,81 +695,3 @@ def create_event(ev: Event):
     ev.ensure_id()
     save_event(ev)
     return ev
-
-# Test endpoints for verification
-@app.post("/test/email")
-def test_email():
-    """Test endpoint to verify email draft creation with sample data."""
-    from app.tools.email import draft_permission_email
-    import json
-    
-    result = draft_permission_email(
-        organization="MACS",
-        event_title="Python Workshop",
-        date="2026-09-15",
-        room="LH-302",
-        expected_headcount=50,
-        start_time="3:30 PM",
-        end_time="5:00 PM",
-        speaker="Dr. John Doe (Alumni, Google)",
-        purpose="This workshop aims to introduce students to Python programming fundamentals and practical applications in data science.",
-        chairperson="Arthana Sreekesh",
-        staff_in_charge="Aysha Fymin Majeed"
-    )
-    return {"email_draft_result": result}
-
-@app.post("/test/form")
-def test_form():
-    """Test endpoint to verify form creation with file upload support."""
-    from app.tools.forms import create_registration_form
-    import json
-    
-    # Test with file_upload field
-    fields = [
-        {"title": "Full Name", "type": "text", "required": True},
-        {"title": "Email", "type": "text", "required": True},
-        {"title": "Phone", "type": "text", "required": False},
-        {"title": "Year", "type": "multiple_choice", "options": ["1st", "2nd", "3rd", "4th"], "required": True},
-        {"title": "Resume", "type": "file_upload", "required": False},
-        {"title": "Portfolio Link", "type": "text", "required": False}
-    ]
-    
-    result = create_registration_form(
-        event_title="Python Workshop",
-        event_date="2026-09-15",
-        description="Learn Python fundamentals and build real-world projects in this hands-on workshop.",
-        fields_json=json.dumps(fields)
-    )
-    return {"form_result": json.loads(result)}
-
-@app.post("/test/letter")
-def test_letter():
-    """Test endpoint to verify permission letter generation."""
-    from app.tools.letters import generate_permission_letter, generate_announcement_preview
-    
-    perm = generate_permission_letter(
-        organization="MACS",
-        event_title="Python Workshop",
-        date="2026-09-15",
-        start_time="3:30 PM",
-        end_time="5:00 PM",
-        room="LH-302",
-        speaker="Dr. John Doe (Alumni, Google)",
-        purpose="This workshop aims to introduce students to Python programming fundamentals and practical applications in data science.",
-        chairperson="Arthana Sreekesh",
-        staff_in_charge="Aysha Fymin Majeed"
-    )
-    
-    ann = generate_announcement_preview(
-        organization="MACS",
-        event_title="Python Workshop",
-        date="2026-09-15",
-        room="LH-302",
-        expected_headcount=50,
-        description="Learn Python fundamentals and build real-world projects in this hands-on workshop."
-    )
-    
-    return {
-        "permission_letter": perm,
-        "announcement_preview": ann
-    }

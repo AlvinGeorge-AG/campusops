@@ -14,6 +14,7 @@ from .tools import (
 from .tools.room import book_room_slot
 from .tools.letters import generate_permission_letter, generate_onfoot_letter, generate_announcement_preview
 from .tools.event_state import upsert_event
+from .config import GEMINI_MODEL_ID
 
 def _build_system_prompt():
     from datetime import datetime
@@ -64,7 +65,7 @@ SYSTEM_PROMPT = _build_system_prompt()
 
 def get_gemini_model():
     api_key = os.getenv("GEMINI_API_KEY")
-    model_id = os.getenv("GEMINI_MODEL_ID", "gemini-2.0-flash")
+    model_id = GEMINI_MODEL_ID
     if not api_key or api_key == "your_gemini_api_key_here":
         raise ValueError("GEMINI_API_KEY not set. Get one from https://aistudio.google.com/apikey and set in backend/.env")
     return GeminiModel(
