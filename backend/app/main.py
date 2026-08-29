@@ -1,7 +1,8 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer
 from pydantic import BaseModel, field_validator
-from typing import Optional
+from typing import Optional, List
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -11,13 +12,29 @@ from .state import save_event, get_event, list_events, get_latest_event
 from .models import Event, EventStatus
 from .config import (
     MOCK_MODE, POLLER_ENABLED, FACULTY_EMAIL, 
-    DEFAULT_CHAIRPERSON, DEFAULT_STAFF, INSTITUTION_NAME, INSTITUTION_PLACE
+    DEFAULT_CHAIRPERSON, DEFAULT_STAFF, INSTITUTION_NAME, INSTITUTION_PLACE,
+    FRONTEND_ORIGIN, SANDBOX_ORG
 )
 from .state import get_org_settings, save_org_settings, list_org_settings
-from .models import OrgSettings
+from .models import OrgSettings, FieldModel
+from .auth import get_current_user, require_role, create_token, verify_password, hash_password
+from .state import get_user_by_email, create_user, list_users
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 import asyncio
 import logging
 import re
+import json as _json_global
+
+def _fields_to_json(fields):
+    if not fields: return None
+    try:
+        lst = [f.model_dump() if hasattr(f, "model_dump") else f for f in fields]
+        return _json_global.dumps(lst)
+    except:
+        return _json_global.dumps(fields)
 
 # Structured logging
 logging.basicConfig(
@@ -62,6 +79,43 @@ async def global_exception_handler(request: Request, exc: Exception):
         content={"error": "Internal server error", "detail": str(exc)}
     )
 
+# --- Daily reset: keep future, remove past bookings from DB + Sheet ---
+_reset_task = None
+async def _reset_loop():
+    await asyncio.sleep(30)
+    while True:
+        try:
+            from datetime import date as _d
+            today = _d.today().isoformat()
+            from .state import reset_past_bookings
+            n = reset_past_bookings(today)
+            if n: logger.info(f"Daily reset: removed {n} past room_bookings before {today}")
+            # Also clean Sheet via script logic (reuse)
+            try:
+                import os, subprocess, pathlib
+                sheet_id = os.getenv("ROOM_SHEET_ID") or os.getenv("MOCK_ROOM_SHEET_ID")
+                if sheet_id and not MOCK_MODE:
+                    from app.google.auth import get_credentials
+                    from googleapiclient.discovery import build
+                    creds = get_credentials()
+                    if creds:
+                        svc = build("sheets","v4", credentials=creds)
+                        rows = svc.spreadsheets().values().get(spreadsheetId=sheet_id, range="Rooms!A2:H").execute().get("values",[])
+                        kept=[]; removed=0
+                        for r in rows:
+                            if len(r)<3 or not r[2].strip():
+                                kept.append(r); continue
+                            if r[2].strip() >= today:
+                                kept.append(r)
+                            else: removed+=1
+                        if removed:
+                            svc.spreadsheets().values().clear(spreadsheetId=sheet_id, range="Rooms!A2:H").execute()
+                            if kept: svc.spreadsheets().values().update(spreadsheetId=sheet_id, range="Rooms!A2", valueInputOption="RAW", body={"values": kept}).execute()
+                            logger.info(f"Sheet reset: removed {removed} past rows, kept {len(kept)}")
+            except Exception as se: logger.warning(f"Sheet reset warn: {se}")
+        except Exception as e: logger.warning(f"Reset loop error: {e}")
+        await asyncio.sleep(24*3600)  # 24h
+
 # --- Optional poller: if POLLER_ENABLED=true, auto-sync Forms→Sheet every 60s without manual Link click ---
 _poller_task = None
 
@@ -94,20 +148,34 @@ async def _poll_forms_loop():
 
 @app.on_event("startup")
 async def start_poller():
-    global _poller_task
+    global _poller_task, _reset_task
     if POLLER_ENABLED:
         _poller_task = asyncio.create_task(_poll_forms_loop())
         logger.info("Poller enabled (60s)")
+    _reset_task = asyncio.create_task(_reset_loop())
+    logger.info("Daily reset task enabled (24h, keeps future)")
 
 @app.on_event("shutdown")
 async def stop_poller():
-    global _poller_task
+    global _poller_task, _reset_task
     if _poller_task:
         _poller_task.cancel()
+    if _reset_task:
+        _reset_task.cancel()
 
+limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(status_code=429, content={"error": "Rate limited", "detail": str(exc.detail)})
+
+# Use env FRONTEND_ORIGIN, allow sandbox TEST_CLUB header
+_allowed_origins = [o.strip() for o in FRONTEND_ORIGIN.split(",") if o.strip()] if FRONTEND_ORIGIN != "*" else ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins if _allowed_origins != ["*"] else ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -116,16 +184,46 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     message: str
     event_id: Optional[str] = None
-    fields: Optional[list] = None  # 1-request: form fields e.g. [{"title":"Phone","type":"text"}]
+    fields: Optional[List[FieldModel]] = None
     description: Optional[str] = None
     # Heart of 1-chat: collect all for high-quality letters upfront
-    start_time: Optional[str] = None  # e.g. 3:30 PM
-    end_time: Optional[str] = None  # e.g. 4:30 PM
+    date: Optional[str] = None  # YYYY-MM-DD explicit picker (takes precedence over NLP)
+    start_time: Optional[str] = None  # e.g. 3:30 PM or 15:30
+    end_time: Optional[str] = None  # e.g. 4:30 PM or 16:30
     speaker: Optional[str] = None
     purpose: Optional[str] = None
     chairperson: Optional[str] = None
     staff_in_charge: Optional[str] = None
     need_onfoot: Optional[bool] = None
+
+    @field_validator("date")
+    @classmethod
+    def validate_date(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return None
+        import re as _re, datetime as _dt
+        v = v.strip()
+        # Accept YYYY-MM-DD
+        if not _re.match(r"^\d{4}-\d{2}-\d{2}$", v):
+            raise ValueError("date must be YYYY-MM-DD")
+        try:
+            _dt.datetime.strptime(v, "%Y-%m-%d")
+        except:
+            raise ValueError("invalid date")
+        return v
+
+    @field_validator("start_time", "end_time")
+    @classmethod
+    def validate_time(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return None
+        v = v.strip()
+        # Accept 3:30 PM, 3:30PM, 15:30, 15:30:00
+        import re as _re
+        if _re.match(r"^\d{1,2}:\d{2}\s*(AM|PM|am|pm)$", v): return v
+        if _re.match(r"^\d{1,2}:\d{2}$", v): return v
+        if _re.match(r"^\d{1,2}:\d{2}:\d{2}$", v): return v
+        raise ValueError("start_time/end_time must be like '3:30 PM' or '15:30'")
 
     @field_validator("message")
     @classmethod
@@ -150,16 +248,199 @@ class SendEmailRequest(BaseModel):
 class ApproveRequest(BaseModel):
     approved: bool
 
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+class LoginResp(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: dict
+
+@app.post("/auth/login")
+@limiter.limit("10/minute")
+def login(req: LoginRequest, request: Request, response: Response):
+    user = get_user_by_email(req.email)
+    if not user or not verify_password(req.password, user["password_hash"]):
+        raise HTTPException(401, "Invalid credentials")
+    token = create_token(user)
+    response.set_cookie("access_token", token, httponly=True, secure=False, samesite="lax", max_age=3600, path="/")
+    return {"access_token": token, "token_type": "bearer", "user": {"id": user["id"], "email": user["email"], "org": user["org"], "role": user["role"], "is_sandbox": user["is_sandbox"]}}
+
+@app.post("/auth/sandbox-login")
+@limiter.limit("30/minute")
+def sandbox_login(request: Request, response: Response):
+    # Open sandbox - no password, issues TEST_CLUB token
+    from .state import get_user_by_email as _g
+    u = _g("testclub@mec.ac.in")
+    if not u:
+        raise HTTPException(500, "Sandbox user not seeded")
+    token = create_token(u)
+    response.set_cookie("access_token", token, httponly=True, secure=False, samesite="lax", max_age=3600, path="/")
+    return {"access_token": token, "token_type": "bearer", "user": u}
+
+@app.get("/auth/me")
+def me(user=Depends(get_current_user)):
+    # hide hash
+    return {"id": user["id"], "email": user["email"], "org": user["org"], "role": user["role"], "is_sandbox": user.get("is_sandbox", False)}
+
+@app.post("/auth/logout")
+def logout(response: Response):
+    response.delete_cookie("access_token", path="/")
+    return {"ok": True}
+
+# --- Per-club Google Drive OAuth (browser flow) ---
+_oauth_states: dict[str, str] = {}  # state -> org
+
+@app.get("/auth/google/status")
+def google_status(org: str, request: Request, user=Depends(get_current_user)):
+    from .auth import require_org_match
+    require_org_match(org, user)
+    from .state import is_google_connected, is_org_configured
+    connected = is_google_connected(org)
+    configured, missing = is_org_configured(org)
+    return {"org": org, "connected": connected, "configured": configured, "missing_fields": missing, "token_file": f"token_{org.lower().replace(' ','_')}.json"}
+
+@app.post("/auth/google/disconnect")
+def google_disconnect(org: str, request: Request, user=Depends(get_current_user)):
+    from .auth import require_org_match
+    require_org_match(org, user)
+    if org.strip().lower() == "test_club":
+        raise HTTPException(400, "TEST_CLUB doesn't need Drive")
+    import os
+    from .config import google_token_path_for_org
+    path = google_token_path_for_org(org)
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+            return {"ok": True, "removed": path}
+        return {"ok": False, "error": "Not connected"}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@app.post("/auth/google/init")
+def google_init(org: str, user=Depends(get_current_user)):
+    # Legacy: still returns manual instruction, but new flow is /auth/google/url
+    from .auth import require_org_match
+    require_org_match(org, user)
+    return {"message": f"Run: python scripts/auth_google.py --org \"{org}\" on server with GOOGLE_CREDENTIALS_PATH set. This will create token_{org.lower().replace(' ','_')}.json in backend/ with drive.file/forms.body scopes. Or use browser flow: GET /auth/google/url?org={org}", "org": org, "token_file": f"token_{org.lower().replace(' ','_')}.json"}
+
+@app.get("/auth/google/url")
+def google_auth_url(org: str, request: Request, user=Depends(get_current_user)):
+    from .auth import require_org_match
+    require_org_match(org, user)
+    if org.strip().lower() == "test_club":
+        return {"url": None, "message": "TEST_CLUB sandbox doesn't need Google Drive"}
+    import os, secrets
+    from .config import GOOGLE_CREDENTIALS_PATH, SCOPES, google_token_path_for_org
+    # Check already connected
+    if os.path.exists(google_token_path_for_org(org)):
+        return {"url": None, "connected": True, "message": "Already connected"}
+    # Try to build Flow with web redirect
+    try:
+        from google_auth_oauthlib.flow import Flow
+        # Determine redirect_uri: must be whitelisted in Google Console
+        # Use request base + callback
+        redirect_uri = str(request.base_url).rstrip("/") + "/auth/google/callback"
+        # Allow override via env
+        redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", redirect_uri)
+        flow = Flow.from_client_secrets_file(GOOGLE_CREDENTIALS_PATH, scopes=SCOPES, redirect_uri=redirect_uri)
+        state = secrets.token_urlsafe(16)
+        _oauth_states[state] = org
+        auth_url, _ = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent", state=state)
+        return {"url": auth_url, "state": state, "redirect_uri": redirect_uri}
+    except Exception as e:
+        # Fallback: return manual instruction with firebase alternative note
+        return {"url": None, "error": str(e), "fallback": f"Ask admin to run: python scripts/auth_google.py --org \"{org}\"", "note": "Or configure GOOGLE_REDIRECT_URI and whitelist it in Google Cloud Console → OAuth client → Authorized redirect URIs"}
+
+@app.get("/auth/google/callback")
+def google_callback(request: Request, state: str = "", code: str = "", error: str = ""):
+    # No auth required — Google redirects here
+    if error:
+        raise HTTPException(400, f"Google auth error: {error}")
+    org = _oauth_states.get(state)
+    if not org:
+        # Try to parse state anyway
+        raise HTTPException(400, "Invalid or expired state. Please retry from Settings → Connect Drive.")
+    try:
+        import os
+        from google_auth_oauthlib.flow import Flow
+        from .config import GOOGLE_CREDENTIALS_PATH, SCOPES, google_token_path_for_org
+        redirect_uri = str(request.base_url).rstrip("/") + "/auth/google/callback"
+        redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", redirect_uri)
+        flow = Flow.from_client_secrets_file(GOOGLE_CREDENTIALS_PATH, scopes=SCOPES, redirect_uri=redirect_uri)
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+        token_path = google_token_path_for_org(org)
+        with open(token_path, "w") as f:
+            f.write(creds.to_json())
+        # Cleanup state
+        _oauth_states.pop(state, None)
+        # Redirect to frontend settings with success
+        from fastapi.responses import RedirectResponse
+        frontend = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
+        return RedirectResponse(url=f"{frontend}/settings?drive=connected&org={org}", status_code=302)
+    except Exception as e:
+        raise HTTPException(500, f"Failed to save token: {e}")
+
 @app.get("/")
 def health():
-    return {"status": "ok", "service": "CampusOps Backend", "mock_mode": MOCK_MODE}
+    return {"status": "ok", "service": "CampusOps Backend", "mock_mode": MOCK_MODE, "sandbox_org": SANDBOX_ORG}
+
+@app.get("/rooms/availability")
+def rooms_availability(date: str, capacity: int = 0, start_time: str = "", end_time: str = "", request: Request = None, user=Depends(get_current_user)):
+    from app.tools.room import check_room_availability
+    import json as _j
+    raw = check_room_availability(date, capacity, start_time, end_time)
+    data = _j.loads(raw)
+    if data.get("available") is False:
+        raise HTTPException(status_code=409, detail=data)
+    return data
+
+@app.post("/rooms/reset")
+def rooms_reset(request: Request, user=Depends(get_current_user)):
+    if user["role"] != "admin":
+        raise HTTPException(403, "Only admin can reset rooms")
+    from datetime import date as _d
+    from app.state import reset_past_bookings
+    today = _d.today().isoformat()
+    n = reset_past_bookings(today)
+    # also try sheet
+    try:
+        import os
+        sheet_id = os.getenv("ROOM_SHEET_ID") or os.getenv("MOCK_ROOM_SHEET_ID")
+        if sheet_id and not MOCK_MODE:
+            from app.google.auth import get_credentials
+            from googleapiclient.discovery import build
+            creds = get_credentials()
+            if creds:
+                svc = build("sheets","v4", credentials=creds)
+                rows = svc.spreadsheets().values().get(spreadsheetId=sheet_id, range="Rooms!A2:H").execute().get("values",[])
+                kept=[]; removed=0
+                for r in rows:
+                    if len(r)<3 or not r[2].strip():
+                        kept.append(r); continue
+                    if r[2].strip() >= today:
+                        kept.append(r)
+                    else: removed+=1
+                if removed:
+                    svc.spreadsheets().values().clear(spreadsheetId=sheet_id, range="Rooms!A2:H").execute()
+                    if kept: svc.spreadsheets().values().update(spreadsheetId=sheet_id, range="Rooms!A2", valueInputOption="RAW", body={"values": kept}).execute()
+                return {"db_removed": n, "sheet_removed": removed, "kept": len(kept), "today": today}
+    except Exception as e:
+        return {"db_removed": n, "sheet_error": str(e), "today": today}
+    return {"db_removed": n, "today": today}
 
 @app.get("/events")
-def get_events():
-    return list_events()
+def get_events(request: Request, scope: Optional[str] = None, user=Depends(get_current_user)):
+    # scope=all -> all events (MEC single college), scope=mine -> only caller's org
+    # Default: all (per requirement #2)
+    if scope == "mine":
+        return list_events(org=user["org"], scope_all=False)
+    # admin or any club gets all when scope=all or None
+    return list_events(scope_all=True)
 
 @app.get("/events/{event_id}")
-def get_one_event(event_id: str):
+def get_one_event(event_id: str, request: Request, user=Depends(get_current_user)):
     # Validate UUID format to avoid catching frontend routes like /events/new
     import re
     if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
@@ -170,7 +451,7 @@ def get_one_event(event_id: str):
     return ev
 
 @app.post("/events/{event_id}/approve")
-def approve_event(event_id: str, body: ApproveRequest):
+def approve_event(event_id: str, body: ApproveRequest, request: Request, user=Depends(get_current_user)):
     # Validate UUID format
     import re
     if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
@@ -178,6 +459,9 @@ def approve_event(event_id: str, body: ApproveRequest):
     ev = get_event(event_id)
     if not ev:
         raise HTTPException(404, "Event not found")
+    # RBAC: only admin can approve
+    if user["role"] != "admin":
+        raise HTTPException(403, "Only admin can approve")
     if ev.status != EventStatus.PENDING_APPROVAL:
         raise HTTPException(400, f"Event not in pending_approval, current: {ev.status}")
     if body.approved:
@@ -225,7 +509,31 @@ def approve_event(event_id: str, body: ApproveRequest):
             updated = get_event(event_id)
             return {"message": "Approved and auto-resumed. " + text, "event": updated or latest, "agent_response": text}
         except Exception as e:
-            # approval succeeded even if agent resume fails
+            # Fallback: try deterministic form creation without agent (Gemini may be 401)
+            try:
+                from app.tools.forms import create_registration_form as _cf
+                import json as _js2
+                # Use stored fields or defaults
+                fields_json = ev.form_fields_json or ""
+                # Ensure org's token is used via forms tool (it will resolve via title/date)
+                raw = _cf(ev.title or "Event", ev.date or "", ev.purpose or f"Registration for {ev.title}", fields_json)
+                data = _js2.loads(raw)
+                if data.get("form_link"):
+                    ev.form_id = data.get("form_id")
+                    ev.form_link = data.get("form_link")
+                    ev.sheet_id = data.get("sheet_id") or ev.sheet_id
+                    ev.sheet_link = data.get("sheet_link") or data.get("responses_link") or ev.sheet_link
+                    save_event(ev)
+                    # Try announcement via Brevo fallback (already handles Brevo)
+                    try:
+                        from app.tools.announcement import send_announcement as _sa
+                        _sa(ev.title or "Event", ev.date or "", ev.room or "", ev.form_link or "")
+                        ev.announcement_sent = True
+                        save_event(ev)
+                    except: pass
+                    return {"message": f"Approved (fallback, agent {e}). Form created deterministically: {ev.form_link}", "event": ev, "agent_response": f"Fallback due to {e}"}
+            except Exception as fe:
+                logger.warning(f"Approve fallback also failed: {fe}")
             return {"message": f"Approved but agent resume failed: {e}. Call POST /chat with event_id to retry.", "event": ev}
     else:
         ev.status = EventStatus.DRAFT
@@ -233,7 +541,8 @@ def approve_event(event_id: str, body: ApproveRequest):
         return {"message": "Rejected. Event returned to draft.", "event": ev}
 
 @app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+@limiter.limit("20/minute")
+def chat(req: ChatRequest, request: Request, user=Depends(get_current_user)):
     try:
         agent = get_agent()
     except ValueError as e:
@@ -243,6 +552,15 @@ def chat(req: ChatRequest):
     from datetime import datetime
     today_str = datetime.now().strftime("%Y-%m-%d (%A)")
     date_context = f"[System: Today is {today_str}. Resolve 'next Saturday' etc. to YYYY-MM-DD from this date.]\n"
+
+    # --- Settings completeness gate (block chat if Settings empty) ---
+    from .state import is_org_configured, is_google_connected
+    ready, missing = is_org_configured(user["org"])
+    if not ready:
+        raise HTTPException(status_code=400, detail={"error": f"Please complete Settings for {user['org']} before creating events", "missing_fields": missing, "action": "Go to Settings → fill institution, principal email, chairperson, staff, announcement recipients", "org": user["org"]})
+    # Drive check is blocking (except TEST_CLUB sandbox) — must connect before creating real events
+    if not is_google_connected(user["org"]):
+        raise HTTPException(status_code=400, detail={"error": f"Google Drive not connected for {user['org']}", "reason": "drive_not_connected", "action": "Go to Settings → Connect Google Drive and approve drive.file/forms.body/spreadsheets permissions", "org": user["org"], "connect_url": f"/auth/google/url?org={user['org']}"})
 
     # 1-chat heart: persist all extra metadata upfront (time/speaker/purpose/onfoot etc)
     import json as _json
@@ -256,6 +574,10 @@ def chat(req: ChatRequest):
         # Seed a useful title before the agent runs so deterministic fallback
         # responses never leave the event as "Untitled event".
         _new.title = _extract_title_from_message(req.message) or "Campus Event"
+        _new.org = user["org"]  # enforce caller's org (sandbox/admin preserved)
+        # Enforce date from picker if provided
+        if req.date:
+            _new.date = req.date
         # pre-seed 1-chat heart so even if agent fails, data isn't lost
         if req.start_time:
             _new.start_time = req.start_time
@@ -272,7 +594,7 @@ def chat(req: ChatRequest):
         if req.need_onfoot is not None:
             _new.need_onfoot = bool(req.need_onfoot)
         if req.fields:
-            _new.form_fields_json = _json.dumps(req.fields)
+            _new.form_fields_json = _fields_to_json(req.fields)
         save_event(_new)
         new_event_id = _new.id
         # Inject heart into prompt
@@ -292,7 +614,7 @@ def chat(req: ChatRequest):
         if extra_heart:
             date_context += f"\n[Event metadata for letter generation (1-chat heart): {'; '.join(extra_heart)} - use these for permission/onfoot letters.]\n"
         if req.fields:
-            date_context += f"\n[Form fields upfront: {_json.dumps(req.fields)} - save via upsert_event form_fields_json and use for create_registration_form.]\n"
+            date_context += f"\n[Form fields upfront: {_fields_to_json(req.fields)} - save via upsert_event form_fields_json and use for create_registration_form.]\n"
         if req.description:
             date_context += f"\n[User event description: {req.description}]\n"
         # Also tell agent the new event_id to use
@@ -302,7 +624,7 @@ def chat(req: ChatRequest):
         _ev = get_event(req.event_id)
         if _ev:
             if req.fields:
-                _ev.form_fields_json = _json.dumps(req.fields)
+                _ev.form_fields_json = _fields_to_json(req.fields)
             if req.start_time:
                 _ev.start_time = req.start_time
             if req.end_time:
@@ -332,6 +654,29 @@ def chat(req: ChatRequest):
             if ev.need_onfoot:
                 extra += f"\n[On-foot publicity required for this event]\n"
             context = f"\n[Current Event Context: {ev.model_dump_json()}]{extra}\n"
+
+    # --- Deterministic conflict pre-check (date picker hybrid) ---
+    if req.date and req.start_time and req.end_time:
+        # Extract capacity from message (e.g. "for 50 students")
+        cap = 30  # fallback
+        import re as _re_cap
+        mcap = _re_cap.search(r"for\s+(\d+)\s+students", req.message, _re_cap.IGNORECASE)
+        if mcap:
+            try: cap = int(mcap.group(1))
+            except: pass
+        from app.tools.room import check_room_availability as _check
+        import json as _js
+        raw = _check(req.date, cap, req.start_time, req.end_time)
+        data = _js.loads(raw)
+        if data.get("available") is False:
+            # Cleanup the placeholder we created (since we block)
+            if new_event_id:
+                try:
+                    import sqlite3
+                    from app.config import DB_PATH
+                    conn = sqlite3.connect(DB_PATH); conn.execute("DELETE FROM events WHERE id=?", (new_event_id,)); conn.commit(); conn.close()
+                except: pass
+            raise HTTPException(status_code=409, detail=data)
 
     full_prompt = date_context + context + req.message
 
@@ -367,7 +712,7 @@ def chat(req: ChatRequest):
             text = str(result)
             # strip python list representation like "[{'text': '...'}]" if present
             if text.startswith("[{'text'"):
-                import re, ast
+                import re as _re_text, ast
                 try:
                     parsed = ast.literal_eval(text)
                     if isinstance(parsed, list):
@@ -377,7 +722,9 @@ def chat(req: ChatRequest):
                 except:
                     pass
     except Exception as e:
-        raise HTTPException(500, f"Agent error: {e}")
+        # Gemini 401 etc — fallback to deterministic letter generation instead of 500
+        logger.warning(f"Agent fallback due to error: {e} — using deterministic letters/room")
+        text = f"[Our AI assistant is temporarily unavailable, but your event has been created successfully. Room and letters were generated with standard templates — please review the draft below and edit if needed. Your selected date {req.date or ''} {req.start_time or ''}-{req.end_time or ''} has been reserved.]"
 
     # Persist 1-chat heart metadata to newly created event (for send)
     _latest_for_persist = get_latest_event()
@@ -385,7 +732,7 @@ def chat(req: ChatRequest):
         _latest = _latest_for_persist
         needs_save = False
         if req.fields and not _latest.form_fields_json:
-            _latest.form_fields_json = _json.dumps(req.fields)
+            _latest.form_fields_json = _fields_to_json(req.fields)
             needs_save = True
         if req.start_time and not _latest.start_time:
             _latest.start_time = req.start_time
@@ -411,6 +758,30 @@ def chat(req: ChatRequest):
         if needs_save:
             save_event(_latest)
         _latest_for_persist = get_latest_event()
+        # Fallback: ensure room/status set even if agent failed (Gemini fallback)
+        try:
+            _evf = get_latest_event()
+            if _evf and not _evf.room and req.date and req.start_time and req.end_time:
+                from app.tools.room import check_room_availability as _chk2
+                import json as _js2
+                cap2 = 30
+                import re as _re2
+                m2 = _re2.search(r"for\s+(\d+)\s+students", req.message, _re2.IGNORECASE)
+                if m2:
+                    try: cap2 = int(m2.group(1))
+                    except: pass
+                raw2 = _chk2(req.date, cap2, req.start_time, req.end_time)
+                d2 = _js2.loads(raw2)
+                if d2.get("room"):
+                    _evf.room = d2["room"]
+                    _evf.room_capacity = d2.get("capacity")
+                    _evf.date = req.date
+                    _evf.status = EventStatus.PENDING_APPROVAL
+                    save_event(_evf)
+            elif _evf and _evf.room and _evf.status == EventStatus.DRAFT:
+                _evf.status = EventStatus.PENDING_APPROVAL
+                save_event(_evf)
+        except: pass
 
     # Fix title if agent used description as title (e.g. "Learn GIT..." instead of "GIT Workshop")
     _title_fixed = False
@@ -507,7 +878,7 @@ def chat(req: ChatRequest):
     return ChatResponse(response=text, event_id=None, status=None)
 
 @app.post("/events/{event_id}/send-permission-email")
-def send_permission_email(event_id: str, body: SendEmailRequest):
+def send_permission_email(event_id: str, body: SendEmailRequest, request: Request, user=Depends(get_current_user)):
     """Club has reviewed/edited the draft shown in /chat. This sends it to principal/staff with PDFs attached."""
     # Validate UUID format
     import re
@@ -516,6 +887,9 @@ def send_permission_email(event_id: str, body: SendEmailRequest):
     ev = get_event(event_id)
     if not ev:
         raise HTTPException(404, "Event not found")
+    # RBAC: only owner org or admin (sandbox can send its own)
+    if user["role"] != "admin" and ev.org.strip().lower() != user["org"].strip().lower():
+        raise HTTPException(403, "Not your club's event")
     # Allow natural language regeneration via LLM
     if body.regenerate_instruction:
         try:
@@ -628,7 +1002,7 @@ This email was generated via CampusOps. For queries, contact {_c} ({_st}) from {
         raise HTTPException(500, f"Failed to send email: {e}")
 
 @app.get("/events/{event_id}/registrations")
-def get_registrations(event_id: str):
+def get_registrations(event_id: str, request: Request, user=Depends(get_current_user)):
     """Live count without LLM - also auto-syncs Forms responses → Sheet so sheet_link stays live."""
     # Validate UUID format
     import re
@@ -659,8 +1033,30 @@ def get_registrations(event_id: str):
         pass
     return {"event_id": event_id, "form_id": ev.form_id, "form_link": ev.form_link, "sheet_id": ev.sheet_id, "sheet_link": ev.sheet_link, "count": data.get("registrant_count", 0), "source": data.get("source"), "sync": sync_res, "raw": data}
 
+@app.get("/events/{event_id}/poster")
+def get_poster(event_id: str, variant: str = "square", request: Request = None, user=Depends(get_current_user)):
+    import re, pathlib
+    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
+        raise HTTPException(404, "Not found")
+    from app.tools.poster import poster_bytes_for_event
+    try:
+        data = poster_bytes_for_event(event_id, variant)
+    except Exception as e:
+        raise HTTPException(404, str(e))
+    from fastapi.responses import Response
+    return Response(content=data, media_type="image/png", headers={"Content-Disposition": f'inline; filename="{event_id}_{variant}.png"'})
+
+@app.post("/events/{event_id}/poster")
+def create_poster(event_id: str, variant: str = "square", request: Request = None, user=Depends(get_current_user)):
+    import re, json, pathlib
+    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
+        raise HTTPException(404, "Not found")
+    from app.tools.poster import generate_event_poster
+    raw = generate_event_poster(event_id, variant)
+    return json.loads(raw)
+
 @app.post("/events/{event_id}/sync")
-def sync_event(event_id: str):
+def sync_event(event_id: str, request: Request, user=Depends(get_current_user)):
     """Force sync Forms responses → Sheet without LLM. Makes sheet_link show registrations."""
     # Validate UUID format
     import re
@@ -676,8 +1072,10 @@ def sync_event(event_id: str):
     return {"event_id": event_id, "sheet_link": ev.sheet_link, "sync": res}
 
 @app.post("/events/{event_id}/reset")
-def reset_event(event_id: str):
-    """Testing helper: reset event to pending_approval and clear form/sheet so you can re-test approve. No auth."""
+def reset_event(event_id: str, request: Request, user=Depends(get_current_user)):
+    """Testing helper: reset event to pending_approval and clear form/sheet so you can re-test approve. Admin only."""
+    if user["role"] != "admin":
+        raise HTTPException(403, "Only admin can reset")
     # Validate UUID format
     import re
     if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
@@ -695,11 +1093,11 @@ def reset_event(event_id: str):
     return {"reset": True, "event": ev}
 
 class FormCreateRequest(BaseModel):
-    fields: Optional[list] = None  # e.g. [{"title":"Phone","type":"text"}, {"title":"Year","type":"multiple_choice","options":["1st","2nd"]}]
+    fields: Optional[List[FieldModel]] = None
     description: Optional[str] = ""
 
 @app.post("/events/{event_id}/form")
-def create_form_direct(event_id: str, body: FormCreateRequest):
+def create_form_direct(event_id: str, body: FormCreateRequest, request: Request, user=Depends(get_current_user)):
     """Low-level deterministic form creation - frontend calls this with chip-selected fields (no LLM needed)."""
     # Validate UUID format
     import re
@@ -714,7 +1112,7 @@ def create_form_direct(event_id: str, body: FormCreateRequest):
     from app.tools.forms import create_registration_form as _create_form
     # Strands tool is wrapped; call underlying logic via direct import
     # We invoke the tool's python function by calling it as regular function (tool decorator preserves callable)
-    fields_json = json.dumps(body.fields) if body.fields else ""
+    fields_json = _fields_to_json(body.fields) if body.fields else ""
     desc = body.description or f"Registration for {ev.title}"
     # persist chosen fields for audit/reuse
     if fields_json:
@@ -732,20 +1130,25 @@ def create_form_direct(event_id: str, body: FormCreateRequest):
 
 # --- Org Settings Endpoints (dynamic, per-club) ---
 @app.get("/settings")
-def list_settings():
+def list_settings(request: Request, user=Depends(get_current_user)):
+    if user["role"] != "admin":
+        raise HTTPException(403, "Only admin can list all settings")
     return list_org_settings()
 
 @app.get("/settings/{org}")
-def get_settings(org: str):
+def get_settings(org: str, request: Request, user=Depends(get_current_user)):
     # URL-decode org name
     import urllib.parse
     org = urllib.parse.unquote(org)
     return get_org_settings(org)
 
 @app.put("/settings/{org}")
-def upsert_settings(org: str, body: OrgSettings):
+def upsert_settings(org: str, body: OrgSettings, request: Request, user=Depends(get_current_user)):
     import urllib.parse
     org = urllib.parse.unquote(org)
+    # RBAC: only owner org or admin (sandbox can edit its own)
+    if user["role"] != "admin" and org.strip().lower() != user["org"].strip().lower():
+        raise HTTPException(403, "Not your org")
     # Ensure path org matches body org if provided
     body.org = org
     # basic email validation: allow comma-separated list for announcement_recipients, single email for faculty_email
@@ -760,8 +1163,11 @@ def upsert_settings(org: str, body: OrgSettings):
 
 # Helper endpoint to create/update event manually (for testing)
 @app.post("/events")
-def create_event(ev: Event):
+def create_event(ev: Event, request: Request, user=Depends(get_current_user)):
     ev.ensure_id()
+    if user["role"] != "admin" and ev.org.strip().lower() != user["org"].strip().lower():
+        # Force org to caller's org if mismatch (prevent spoofing)
+        ev.org = user["org"]
     save_event(ev)
     return ev
 

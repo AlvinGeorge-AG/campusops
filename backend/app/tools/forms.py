@@ -59,21 +59,30 @@ def create_registration_form(event_title: str, event_date: str, description: str
     try:
         from ..google.auth import get_credentials
         from googleapiclient.discovery import build
-        creds = get_credentials()
+        # Resolve org/room from event matching title/date (not just latest) for per-club Drive isolation
+        org = ""
+        room = ""
+        _resolved_org = None
+        try:
+            from ..state import list_events as _le
+            for _ev in _le():
+                if _ev.title == event_title and _ev.date == event_date:
+                    org = _ev.org or ""; room = _ev.room or ""; _resolved_org = _ev.org; break
+        except: pass
+        if not org:
+            try:
+                from ..state import get_latest_event as _get_ev
+                _ev2 = _get_ev()
+                if _ev2:
+                    org = _ev2.org or ""; room = _ev2.room or ""; _resolved_org = _ev2.org
+            except: pass
+        creds = get_credentials(_resolved_org)
+        if not creds:
+            # Fallback to default creds
+            creds = get_credentials()
         if not creds:
             raise Exception("No credentials")
         service = build("forms", "v1", credentials=creds)
-        # Resolve org/room for detailed heading from latest event
-        org = ""
-        room = ""
-        try:
-            from ..state import get_latest_event as _get_ev
-            _ev2 = _get_ev()
-            if _ev2:
-                org = _ev2.org or ""
-                room = _ev2.room or ""
-        except:
-            pass
         
         # Check if any field is file_upload type - create Drive folder for uploads
         upload_folder_link = ""
@@ -97,12 +106,16 @@ def create_registration_form(event_title: str, event_date: str, description: str
         # Prefer stored purpose from Event if passed desc is generic/empty
         if not _desc:
             try:
-                from ..state import get_latest_event as _get_ev2b
-                _evb = _get_ev2b()
-                if _evb and _evb.purpose and len(_evb.purpose.strip()) > 10:
-                    _desc = _evb.purpose.strip()
-            except:
-                pass
+                from ..state import list_events as _le2
+                for _evb in _le2():
+                    if _evb.title == event_title and _evb.date == event_date and _evb.purpose and len(_evb.purpose.strip()) > 10:
+                        _desc = _evb.purpose.strip(); break
+                if not _desc:
+                    from ..state import get_latest_event as _get_ev2b
+                    _evb = _get_ev2b()
+                    if _evb and _evb.purpose and len(_evb.purpose.strip()) > 10:
+                        _desc = _evb.purpose.strip()
+            except: pass
         
         # Get additional event metadata for richer description
         speaker = ""
@@ -110,15 +123,17 @@ def create_registration_form(event_title: str, event_date: str, description: str
         end_time = ""
         expected_headcount = 0
         try:
-            from ..state import get_latest_event as _get_ev3
-            _ev3 = _get_ev3()
-            if _ev3:
-                speaker = _ev3.speaker or ""
-                start_time = _ev3.start_time or ""
-                end_time = _ev3.end_time or ""
-                expected_headcount = _ev3.expected_headcount or 0
-        except:
-            pass
+            from ..state import list_events as _le3
+            found=False
+            for _ev3 in _le3():
+                if _ev3.title == event_title and _ev3.date == event_date:
+                    speaker = _ev3.speaker or ""; start_time = _ev3.start_time or ""; end_time = _ev3.end_time or ""; expected_headcount = _ev3.expected_headcount or 0; found=True; break
+            if not found:
+                from ..state import get_latest_event as _get_ev3
+                _ev3 = _get_ev3()
+                if _ev3:
+                    speaker = _ev3.speaker or ""; start_time = _ev3.start_time or ""; end_time = _ev3.end_time or ""; expected_headcount = _ev3.expected_headcount or 0
+        except: pass
         
         detailed_desc = ""
         if org:

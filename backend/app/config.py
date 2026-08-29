@@ -36,3 +36,20 @@ ANNOUNCEMENT_RECIPIENTS = _env("ANNOUNCEMENT_RECIPIENTS", "students@example.com"
 MOCK_MODE = _env("MOCK_MODE", "false").lower() == "true"
 POLLER_ENABLED = _env("POLLER_ENABLED", "false").lower() == "true"
 GEMINI_MODEL_ID = _env("GEMINI_MODEL_ID", "gemini-3.5-flash-lite")
+# Auth / RBAC
+JWT_SECRET = _env("JWT_SECRET", "dev-secret-change-in-prod-please-rotate")
+JWT_ALGORITHM = _env("JWT_ALGORITHM", "HS256")
+JWT_EXP_MINUTES = int(_env("JWT_EXP_MINUTES", "60"))
+SANDBOX_ORG = _env("SANDBOX_ORG", "TEST_CLUB")
+FRONTEND_ORIGIN = _env("FRONTEND_ORIGIN", "http://localhost:5173")
+BCRYPT_ROUNDS = int(_env("BCRYPT_ROUNDS", "12"))
+
+CENTRAL_DRIVE = _env("CENTRAL_DRIVE", "true").lower() == "true"
+GOOGLE_REDIRECT_URI = _env("GOOGLE_REDIRECT_URI", "http://localhost:8000/auth/google/callback")
+
+# Per-club Google tokens
+def google_token_path_for_org(org: str) -> str:
+    if not org or org.strip().lower() == SANDBOX_ORG.lower():
+        return _env("GOOGLE_TOKEN_PATH", str(BASE_DIR / "token.json"))
+    safe = "".join(c if c.isalnum() else "_" for c in org.strip().lower())[:32]
+    return str(BASE_DIR / f"token_{safe}.json")

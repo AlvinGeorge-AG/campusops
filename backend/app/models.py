@@ -1,8 +1,34 @@
 from enum import Enum
-from pydantic import BaseModel, EmailStr, field_validator
-from typing import Optional
+from pydantic import BaseModel, EmailStr, field_validator, Field, model_validator
+from typing import Optional, List, Literal, Annotated
 from datetime import datetime
 import uuid
+
+FieldType = Literal["text","paragraph","multiple_choice","checkbox","file_upload"]
+
+class FieldModel(BaseModel):
+    title: Annotated[str, Field(min_length=1, max_length=80)]
+    type: FieldType
+    required: bool = True
+    options: Optional[List[Annotated[str, Field(min_length=1, max_length=40)]]] = None
+    placeholder: Optional[Annotated[str, Field(max_length=120)]] = None
+
+    @field_validator("title")
+    @classmethod
+    def strip_title(cls, v: str) -> str:
+        return v.strip()
+
+    @model_validator(mode="after")
+    def check_options(self):
+        if self.type in ("multiple_choice","checkbox"):
+            if not self.options or len(self.options) < 2:
+                raise ValueError("multiple_choice/checkbox requires >=2 options")
+            low = [o.strip().lower() for o in self.options]
+            if len(low) != len(set(low)):
+                raise ValueError("duplicate options")
+        if self.type == "file_upload" and self.options:
+            raise ValueError("file_upload must not have options")
+        return self
 
 class EventStatus(str, Enum):
     DRAFT = "draft"
@@ -57,6 +83,10 @@ class OrgSettings(BaseModel):
     announcement_recipients: str = "students@example.com"  # comma-separated
     chairperson: str = ""
     staff_in_charge: str = ""
+    allowed_types: List[FieldType] = ["text","paragraph","multiple_choice","checkbox","file_upload"]
+    required_titles: List[str] = []
+    max_fields: int = 10
+    form_template: Optional[List[FieldModel]] = None
     updated_at: str = ""
 
     @field_validator("org")
