@@ -24,7 +24,7 @@ Change in production: `python -c "from app.state import create_user; from app.au
 ## Per-Club Drive Isolation
 - Each club runs `scripts/auth_google.py --org "CLUB"` once on server (needs `credentials.json`). Creates `backend/token_club.json` with `drive.file,forms.body,spreadsheets` scopes.
 - `app/google/auth.py:get_credentials(org)` routes to `token_{slug}.json` via `app/config.py:google_token_path_for_org`.
-- `app/tools/forms.py:265` + `poster.py` use club creds → files in club's Drive. Admin's `rooms_sheet` (`ROOM_SHEET_ID`) remains admin-owned, shared as `reader` to clubs.
+- `app/tools/forms.py:265` uses club creds → files in club's Drive. Admin's `rooms_sheet` (`ROOM_SHEET_ID`) remains admin-owned, shared as `reader` to clubs.
 
 ## Security Checklist
 - Rotate `JWT_SECRET` in `backend/.env` (32+ random chars), `BREVO_API_KEY`, `GEMINI_API_KEY` (were committed — rotate via Brevo/Gemini dashboards).

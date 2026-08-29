@@ -1052,16 +1052,6 @@ def get_registrations(event_id: str, request: Request, user=Depends(get_current_
         pass
     return {"event_id": event_id, "form_id": ev.form_id, "form_link": ev.form_link, "sheet_id": ev.sheet_id, "sheet_link": ev.sheet_link, "count": data.get("registrant_count", 0), "source": data.get("source"), "sync": sync_res, "raw": data}
 
-@app.post("/events/{event_id}/poster")
-def create_poster(event_id: str, variant: str = "square", request: Request = None, user=Depends(get_current_user)):
-    raise HTTPException(410, "Poster generation has been removed")
-    import re, json, pathlib
-    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
-        raise HTTPException(404, "Not found")
-    from app.tools.poster import generate_event_poster
-    raw = generate_event_poster(event_id, variant)
-    return json.loads(raw)
-
 @app.post("/events/{event_id}/sync")
 def sync_event(event_id: str, request: Request, user=Depends(get_current_user)):
     """Force sync Forms responses → Sheet without LLM. Makes sheet_link show registrations."""

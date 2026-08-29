@@ -20,7 +20,7 @@ Welcome, Club Admin! This guide is for **FOSS MEC, MACS MEC, IEEE MEC** (and `TE
 
 - Admin clicks **Approve** in `Admin Queue`. The system:
   - Creates **Google Form + linked Sheet** in central Drive per-club folder and shares to your Gmail (link appears on event page)
-  - Sends **announcement** via Brevo to your recipient list **plus a shareable poster** (1080×1080 Instagram & 1080×1920 Story, QR to form) saved in `CampusOps Posters/` central and shared — download from event page and share to WhatsApp/IG.
+  - Sends the **announcement** via Brevo to your recipient list after approval.
 - **Registrations sync every 60s** to your Sheet; `Dashboard` count updates.
 
 ## 4) View Events

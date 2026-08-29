@@ -12,6 +12,3 @@
 ## RBAC
 - JWT `HttpOnly` cookie + `Authorization: Bearer` fallback, `exp` 60m, `role` claim. `require_role('admin')` on `approve/reset`. `TEST_CLUB` bypass via `is_sandbox`.
 - `Dashboard` `GET /events?scope=all|mine` server-filtered (`app/state.py:list_events(org,scope_all)`).
-
-## Poster
-- Generated `Pillow+ qrcode` 1080x1080 & 1080x1920, saved `backend/data/posters/{id}_{variant}.png` and optionally `CampusOps Posters/` in club Drive. Shareable QR to form.
