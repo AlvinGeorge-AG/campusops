@@ -46,7 +46,7 @@ JWT_SECRET = _env("JWT_SECRET", "dev-secret-change-in-prod-please-rotate")
 JWT_ALGORITHM = _env("JWT_ALGORITHM", "HS256")
 JWT_EXP_MINUTES = int(_env("JWT_EXP_MINUTES", "60"))
 SANDBOX_ORG = _env("SANDBOX_ORG", "TEST_CLUB")
-FRONTEND_ORIGIN = _env("FRONTEND_ORIGIN", "http://localhost:5173")
+FRONTEND_ORIGIN = _env("FRONTEND_ORIGIN", "http://localhost:5173,https://campusops-ft.vercel.app,https://campusops.onrender.com")
 BCRYPT_ROUNDS = int(_env("BCRYPT_ROUNDS", "12"))
 
 CENTRAL_DRIVE = _env("CENTRAL_DRIVE", "true").lower() == "true"

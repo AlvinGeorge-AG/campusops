@@ -329,10 +329,14 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
     return JSONResponse(status_code=429, content={"error": "Rate limited", "detail": str(exc.detail)})
 
 # Use env FRONTEND_ORIGIN, allow sandbox TEST_CLUB header
+# Support comma-separated list and wildcard vercel preview deployments
 _allowed_origins = [o.strip() for o in FRONTEND_ORIGIN.split(",") if o.strip()] if FRONTEND_ORIGIN != "*" else ["*"]
+# Allow any vercel.app subdomain for preview deployments when not using "*"
+_vercel_regex = r"https://.*\.vercel\.app" if _allowed_origins != ["*"] else None
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins if _allowed_origins != ["*"] else ["*"],
+    allow_origin_regex=_vercel_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
