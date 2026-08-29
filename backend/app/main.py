@@ -453,6 +453,16 @@ def get_events(request: Request, scope: Optional[str] = None, user=Depends(get_c
     # admin or any club gets all when scope=all or None
     return list_events(scope_all=True)
 
+@app.get("/events/new")
+def new_event_page():
+    """Serve the React route before the parameterized event endpoint handles it."""
+    from pathlib import Path
+    from fastapi.responses import FileResponse
+    index_file = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist" / "index.html"
+    if not index_file.exists():
+        raise HTTPException(404, "Frontend not built")
+    return FileResponse(index_file)
+
 @app.get("/events/{event_id}")
 def get_one_event(event_id: str, request: Request, user=Depends(get_current_user)):
     # Validate UUID format to avoid catching frontend routes like /events/new
