@@ -47,7 +47,7 @@ class Event(BaseModel):
     expected_headcount: int = 0
     room: Optional[str] = None
     room_capacity: Optional[int] = None
-    speaker: Optional[str] = None  # e.g. Mr. Deepak Padmanabhan (Alumni)
+    speaker: Optional[str] = None  
     purpose: Optional[str] = None  # detailed purpose for letter
     chairperson: Optional[str] = None  
     staff_in_charge: Optional[str] = None  
