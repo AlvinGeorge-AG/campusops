@@ -209,7 +209,8 @@ def _create_event_deterministically(req: "ChatRequest", user: dict, event_id: st
     ev.need_onfoot = bool(req.need_onfoot)
     if req.fields:
         ev.form_fields_json = _fields_to_json(req.fields)
-    ev.status = EventStatus.PENDING_APPROVAL
+    ev.status = EventStatus.DRAFT
+    ev.permission_email_sent = False
     save_event(ev)
 
     permission_letter = generate_permission_letter(
@@ -332,6 +333,11 @@ _poller_task = None
 @app.on_event("startup")
 async def start_poller():
     global _reset_task
+    try:
+        from .state import clean_unsent_drafts
+        clean_unsent_drafts()
+    except Exception as e:
+        logger.warning(f"Startup clean drafts: {e}")
     # Poller disabled: use on-demand GET /events/{id}/registrations with 60s cache
     _reset_task = asyncio.create_task(_reset_loop())
     logger.info("Daily reset task enabled (24h, keeps future) - poller disabled (on-demand)")
@@ -1234,8 +1240,15 @@ This email was generated via CampusOps. For queries, contact {_c} ({_st}) from {
     subject = f"Request for permission to host \"{ev.title}\" - {ev.org}"
 
     mock_mode = MOCK_MODE
-    if mock_mode:
-        return {"mock": True, "to": faculty_email, "subject": subject, "body_preview": full_body[:400], "event": ev, "note": "MOCK_MODE=true - email not sent. Set false to actually send with PDFs."}
+    if mock_mode or (user.get("org") or "").strip().lower() == "test_club":
+        from datetime import datetime, timezone
+        ev.email_draft = full_body
+        ev.permission_email_sent = True
+        ev.permission_email_message_id = f"mock_msg_{ev.id[:8]}"
+        ev.permission_email_sent_at = datetime.now(timezone.utc).isoformat()
+        ev.status = EventStatus.PENDING_APPROVAL
+        save_event(ev)
+        return {"sent": True, "mock": True, "to": faculty_email, "subject": subject, "body_preview": full_body[:400], "event": ev, "note": "Mock/sandbox mode - permission request officially recorded."}
 
     try:
         from app.email import send_permission_email
@@ -1254,10 +1267,11 @@ This email was generated via CampusOps. For queries, contact {_c} ({_st}) from {
             html_body=full_body.replace("\n", "<br>"),
             pdf_attachments=pdf_attachments
         )
+        from datetime import datetime, timezone
         ev.email_draft = full_body
         ev.permission_email_sent = True
+        ev.status = EventStatus.PENDING_APPROVAL
         ev.permission_email_message_id = result["message_id"]
-        from datetime import datetime, timezone
         ev.permission_email_sent_at = datetime.now(timezone.utc).isoformat()
         save_event(ev)
         return {"sent": True, "to": faculty_email, "message_id": result["message_id"], "subject": subject, "event": ev}

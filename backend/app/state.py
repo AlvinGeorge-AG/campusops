@@ -261,7 +261,29 @@ def get_event(event_id: str) -> Optional[Event]:
     finally:
         conn.close()
 
-def list_events(org: Optional[str] = None, scope_all: bool = True) -> List[Event]:
+def clean_unsent_drafts():
+    conn = get_conn()
+    _pg_ensure(conn)
+    try:
+        if _is_pg():
+            conn.execute("DELETE FROM events WHERE status = 'draft' OR (data->>'permission_email_sent' IS NULL OR data->>'permission_email_sent' = 'false') AND status != 'live' AND status != 'closed'")
+        else:
+            cur = conn.execute("SELECT id, data FROM events WHERE status = 'draft'")
+            rows = cur.fetchall()
+            for r in rows:
+                try:
+                    d = json.loads(r[1] if not isinstance(r[1], dict) else json.dumps(r[1]))
+                    if not d.get("permission_email_sent"):
+                        conn.execute("DELETE FROM events WHERE id = ?", (r[0],))
+                except:
+                    conn.execute("DELETE FROM events WHERE id = ?", (r[0],))
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+def list_events(org: Optional[str] = None, scope_all: bool = True, include_drafts: bool = False) -> List[Event]:
     ph = _ph()
     conn = get_conn()
     _pg_ensure(conn)
@@ -277,7 +299,14 @@ def list_events(org: Optional[str] = None, scope_all: bool = True) -> List[Event
             if isinstance(raw, dict):
                 raw = json.dumps(raw)
             try:
-                evs.append(Event.model_validate_json(raw))
+                ev = Event.model_validate_json(raw)
+                # Only include events with successful permission request sent (or live/closed)
+                if not include_drafts:
+                    if ev.status == EventStatus.DRAFT:
+                        continue
+                    if not ev.permission_email_sent and ev.status not in (EventStatus.LIVE, EventStatus.CLOSED):
+                        continue
+                evs.append(ev)
             except: pass
         try:
             evs.sort(key=lambda e: (e.date or "", e.created_at or ""), reverse=True)
