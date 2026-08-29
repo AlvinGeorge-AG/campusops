@@ -17,6 +17,16 @@ def send_announcement(event_title: str, event_date: str, room: str, registration
     """
     mock_mode = os.getenv("MOCK_MODE", "false").lower() == "true"
     recipients = os.getenv("ANNOUNCEMENT_RECIPIENTS", "students@example.com")
+    # Resolve dynamic org settings if event org known
+    try:
+        from ..state import get_latest_event, get_org_settings
+        _ev2 = get_latest_event()
+        if _ev2 and _ev2.org:
+            _s = get_org_settings(_ev2.org)
+            if _s.announcement_recipients:
+                recipients = _s.announcement_recipients
+    except:
+        pass
 
     # Reuse announcement draft that was already approved by authority if available
     reused = False

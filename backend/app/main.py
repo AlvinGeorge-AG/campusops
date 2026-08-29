@@ -13,6 +13,8 @@ from .config import (
     MOCK_MODE, POLLER_ENABLED, FACULTY_EMAIL, 
     DEFAULT_CHAIRPERSON, DEFAULT_STAFF, INSTITUTION_NAME, INSTITUTION_PLACE
 )
+from .state import get_org_settings, save_org_settings, list_org_settings
+from .models import OrgSettings
 import asyncio
 import logging
 import re
@@ -24,6 +26,9 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger(__name__)
+
+# Suppress noisy googleapiclient discovery cache warnings
+logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.WARNING)
 
 def _extract_title_from_message(msg: str) -> str:
     """Heuristic: 'FOSS MEC wants to conduct a Java workshop for 50...' -> 'Java Workshop'"""
@@ -155,6 +160,10 @@ def get_events():
 
 @app.get("/events/{event_id}")
 def get_one_event(event_id: str):
+    # Validate UUID format to avoid catching frontend routes like /events/new
+    import re
+    if not re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', event_id):
+        raise HTTPException(404, "Not found")
     ev = get_event(event_id)
     if not ev:
         raise HTTPException(404, "Event not found")
@@ -162,6 +171,10 @@ def get_one_event(event_id: str):
 
 @app.post("/events/{event_id}/approve")
 def approve_event(event_id: str, body: ApproveRequest):
+    # Validate UUID format
+    import re
+    if not re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', event_id):
+        raise HTTPException(404, "Not found")
     ev = get_event(event_id)
     if not ev:
         raise HTTPException(404, "Event not found")
@@ -425,9 +438,14 @@ def chat(req: ChatRequest):
         if need_perm or need_onfoot or need_ann:
             try:
                 from app.tools.letters import generate_permission_letter, generate_onfoot_letter, generate_announcement_preview
+                # Resolve dynamic defaults from org settings
+                _s = get_org_settings(latest_for_letters.org or req.message[:30])
+                _def_org = _s.org if _s.org and _s.org != "default" else (latest_for_letters.org or "FOSS MEC")
+                _def_chair = _s.chairperson or "Arthana Sreekesh"
+                _def_staff = _s.staff_in_charge or "Aysha Fymin Majeed"
                 if need_perm:
                     generate_permission_letter(
-                        latest_for_letters.org or "FOSS MEC",
+                        latest_for_letters.org or _def_org,
                         latest_for_letters.title or "Workshop",
                         latest_for_letters.date or "2026-08-31",
                         latest_for_letters.start_time or req.start_time or "3:30 PM",
@@ -435,12 +453,12 @@ def chat(req: ChatRequest):
                         latest_for_letters.room or "SDPK",
                         latest_for_letters.speaker or req.speaker or "",
                         latest_for_letters.purpose or req.purpose or req.description or "",
-                        latest_for_letters.chairperson or req.chairperson or "Arthana Sreekesh",
-                        latest_for_letters.staff_in_charge or req.staff_in_charge or "Aysha Fymin Majeed"
+                        latest_for_letters.chairperson or req.chairperson or _def_chair,
+                        latest_for_letters.staff_in_charge or req.staff_in_charge or _def_staff
                     )
                 if need_onfoot:
                     generate_onfoot_letter(
-                        latest_for_letters.org or "FOSS MEC",
+                        latest_for_letters.org or _def_org,
                         latest_for_letters.title or "Workshop",
                         latest_for_letters.date or "2026-08-31",
                         latest_for_letters.start_time or req.start_time or "3:30 PM",
@@ -448,12 +466,12 @@ def chat(req: ChatRequest):
                         latest_for_letters.room or "SDPK",
                         latest_for_letters.speaker or req.speaker or "",
                         latest_for_letters.purpose or req.purpose or req.description or "",
-                        latest_for_letters.chairperson or req.chairperson or "Arthana Sreekesh",
-                        latest_for_letters.staff_in_charge or req.staff_in_charge or "Aysha Fymin Majeed"
+                        latest_for_letters.chairperson or req.chairperson or _def_chair,
+                        latest_for_letters.staff_in_charge or req.staff_in_charge or _def_staff
                     )
                 if need_ann:
                     generate_announcement_preview(
-                        latest_for_letters.org or "FOSS MEC",
+                        latest_for_letters.org or _def_org,
                         latest_for_letters.title or "Workshop",
                         latest_for_letters.date or "2026-08-31",
                         latest_for_letters.room or "SDPK",
@@ -467,9 +485,13 @@ def chat(req: ChatRequest):
     latest = get_latest_event()
     if latest:
         email_preview = latest.email_draft or latest.permission_letter or ""
-        # If still empty, build a minimal preview for frontend
+        # If still empty, build a minimal preview for frontend using org settings
         if not email_preview and latest.title:
-            email_preview = f"To,\nThe Principal,\n{INSTITUTION_NAME},\n{INSTITUTION_PLACE}.\n\nSubject: Request for permission to host \"{latest.title}\"\n\nRespected Sir/Madam,\n\nI am writing to request permission to conduct \"{latest.title}\", organized by {latest.org}, on {latest.date} from {latest.start_time or '3:30 PM'} to {latest.end_time or '4:30 PM'} at {latest.room}.\n\n{latest.purpose or ''}\n\nThank you.\n\nWith regards,\nChairperson {latest.org}\n{latest.chairperson or DEFAULT_CHAIRPERSON}"
+            _s_prev = get_org_settings(latest.org or "")
+            _inst_n = _s_prev.institution_name or INSTITUTION_NAME
+            _inst_p = _s_prev.institution_place or INSTITUTION_PLACE
+            _chair = latest.chairperson or _s_prev.chairperson or DEFAULT_CHAIRPERSON
+            email_preview = f"To,\nThe Principal,\n{_inst_n},\n{_inst_p}.\n\nSubject: Request for permission to host \"{latest.title}\"\n\nRespected Sir/Madam,\n\nI am writing to request permission to conduct \"{latest.title}\", organized by {latest.org}, on {latest.date} from {latest.start_time or '3:30 PM'} to {latest.end_time or '4:30 PM'} at {latest.room}.\n\n{latest.purpose or ''}\n\nThank you.\n\nWith regards,\nChairperson {latest.org}\n{_chair}"
         return ChatResponse(
             response=text,
             event_id=latest.id,
@@ -484,6 +506,10 @@ def chat(req: ChatRequest):
 @app.post("/events/{event_id}/send-permission-email")
 def send_permission_email(event_id: str, body: SendEmailRequest):
     """Club has reviewed/edited the draft shown in /chat. This sends it to principal/staff with PDFs attached."""
+    # Validate UUID format
+    import re
+    if not re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', event_id):
+        raise HTTPException(404, "Not found")
     ev = get_event(event_id)
     if not ev:
         raise HTTPException(404, "Event not found")
@@ -528,6 +554,10 @@ def send_permission_email(event_id: str, body: SendEmailRequest):
     venue_info = f"Venue: {ev.room}"
     date_info = f"Date: {ev.date}"
     
+    # Resolve org settings for signature fallback
+    _s_email = get_org_settings(ev.org or "")
+    _c = ev.chairperson or _s_email.chairperson or DEFAULT_CHAIRPERSON
+    _st = ev.staff_in_charge or _s_email.staff_in_charge or DEFAULT_STAFF
     full_body = f"""Respected Sir/Madam,
 
 I hope you are well. On behalf of {ev.org}, I am writing to seek your kind permission to host "{ev.title}" on {ev.date}.
@@ -545,13 +575,13 @@ We would be grateful for your approval. Thank you for your continued support.
 
 With regards,
 Chairperson {ev.org}
-{ev.chairperson or DEFAULT_CHAIRPERSON}
+{_c}
 
 Staff In Charge {ev.org}
-{ev.staff_in_charge or DEFAULT_STAFF}
+{_st}
 
 ---
-This email was generated via CampusOps. For queries, contact {ev.chairperson or DEFAULT_CHAIRPERSON} ({ev.staff_in_charge or DEFAULT_STAFF}) from {ev.org}.
+This email was generated via CampusOps. For queries, contact {_c} ({_st}) from {ev.org}.
 """
 
     # Build PDFs
@@ -560,7 +590,9 @@ This email was generated via CampusOps. For queries, contact {ev.chairperson or 
     from email.mime.text import MIMEText
     from email.mime.application import MIMEApplication
     from app.pdf import permission_letter_pdf, onfoot_letter_pdf
-    faculty_email = FACULTY_EMAIL
+    from app.google.auth import get_credentials
+    from googleapiclient.discovery import build
+    faculty_email = _s_email.faculty_email or FACULTY_EMAIL
     subject = f"Request for permission to host \"{ev.title}\" - {ev.org}"
 
     mock_mode = MOCK_MODE
@@ -568,35 +600,25 @@ This email was generated via CampusOps. For queries, contact {ev.chairperson or 
         return {"mock": True, "to": faculty_email, "subject": subject, "body_preview": full_body[:400], "event": ev, "note": "MOCK_MODE=true - email not sent. Set false to actually send with PDFs."}
 
     try:
-        from app.google.auth import get_credentials
-        from googleapiclient.discovery import build
-        creds = get_credentials()
-        if not creds:
-            raise Exception("No credentials")
-        service = build("gmail", "v1", credentials=creds)
-        msg = MIMEMultipart()
-        msg["to"] = faculty_email
-        msg["subject"] = subject
-        msg.attach(MIMEText(full_body, "plain"))
-        # Attach permission letter PDF (only this + onfoot, no announcement PDF)
+        from app.email import send_permission_email
+        
+        pdf_attachments = []
         if ev.permission_letter:
             pdf_bytes = permission_letter_pdf(ev.permission_letter)
-            part = MIMEApplication(pdf_bytes, _subtype="pdf")
-            part.add_header("Content-Disposition", "attachment", filename=f"Permission_Letter_{ev.title.replace(' ', '_')}.pdf")
-            msg.attach(part)
-        # Attach on-foot letter PDF if needed (now guaranteed if need_onfoot)
+            pdf_attachments.append((f"Permission_Letter_{ev.title.replace(' ', '_')}.pdf", pdf_bytes))
         if ev.need_onfoot and ev.onfoot_letter:
             pdf_bytes = onfoot_letter_pdf(ev.onfoot_letter)
-            part = MIMEApplication(pdf_bytes, _subtype="pdf")
-            part.add_header("Content-Disposition", "attachment", filename=f"OnFoot_Publicity_{ev.title.replace(' ', '_')}.pdf")
-            msg.attach(part)
-        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-        sent = service.users().messages().send(userId="me", body={"raw": raw}).execute()
-        # Update event status to reflect sent
+            pdf_attachments.append((f"OnFoot_Publicity_{ev.title.replace(' ', '_')}.pdf", pdf_bytes))
+        
+        result = send_permission_email(
+            to_email=faculty_email,
+            subject=subject,
+            html_body=full_body.replace("\n", "<br>"),
+            pdf_attachments=pdf_attachments
+        )
         ev.email_draft = full_body
-        ev.status = ev.status  # stay pending_approval until admin approves
         save_event(ev)
-        return {"sent": True, "to": faculty_email, "message_id": sent["id"], "subject": subject, "event": ev}
+        return {"sent": True, "to": faculty_email, "message_id": result["message_id"], "subject": subject, "event": ev}
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -605,6 +627,10 @@ This email was generated via CampusOps. For queries, contact {ev.chairperson or 
 @app.get("/events/{event_id}/registrations")
 def get_registrations(event_id: str):
     """Live count without LLM - also auto-syncs Forms responses → Sheet so sheet_link stays live."""
+    # Validate UUID format
+    import re
+    if not re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', event_id):
+        raise HTTPException(404, "Not found")
     ev = get_event(event_id)
     if not ev:
         raise HTTPException(404, "Event not found")
@@ -633,6 +659,10 @@ def get_registrations(event_id: str):
 @app.post("/events/{event_id}/sync")
 def sync_event(event_id: str):
     """Force sync Forms responses → Sheet without LLM. Makes sheet_link show registrations."""
+    # Validate UUID format
+    import re
+    if not re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', event_id):
+        raise HTTPException(404, "Not found")
     ev = get_event(event_id)
     if not ev:
         raise HTTPException(404, "Event not found")
@@ -645,6 +675,10 @@ def sync_event(event_id: str):
 @app.post("/events/{event_id}/reset")
 def reset_event(event_id: str):
     """Testing helper: reset event to pending_approval and clear form/sheet so you can re-test approve. No auth."""
+    # Validate UUID format
+    import re
+    if not re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', event_id):
+        raise HTTPException(404, "Not found")
     ev = get_event(event_id)
     if not ev:
         raise HTTPException(404, "Event not found")
@@ -664,6 +698,10 @@ class FormCreateRequest(BaseModel):
 @app.post("/events/{event_id}/form")
 def create_form_direct(event_id: str, body: FormCreateRequest):
     """Low-level deterministic form creation - frontend calls this with chip-selected fields (no LLM needed)."""
+    # Validate UUID format
+    import re
+    if not re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', event_id):
+        raise HTTPException(404, "Not found")
     ev = get_event(event_id)
     if not ev:
         raise HTTPException(404, "Event not found")
@@ -689,9 +727,64 @@ def create_form_direct(event_id: str, body: FormCreateRequest):
         save_event(ev)
     return {"event": ev, "form_result": result}
 
+# --- Org Settings Endpoints (dynamic, per-club) ---
+@app.get("/settings")
+def list_settings():
+    return list_org_settings()
+
+@app.get("/settings/{org}")
+def get_settings(org: str):
+    # URL-decode org name
+    import urllib.parse
+    org = urllib.parse.unquote(org)
+    return get_org_settings(org)
+
+@app.put("/settings/{org}")
+def upsert_settings(org: str, body: OrgSettings):
+    import urllib.parse
+    org = urllib.parse.unquote(org)
+    # Ensure path org matches body org if provided
+    body.org = org
+    # basic email validation: allow comma-separated list for announcement_recipients, single email for faculty_email
+    if body.faculty_email and "@" not in body.faculty_email:
+        raise HTTPException(400, "faculty_email must be a valid email")
+    # announcement_recipients can be comma separated; validate each
+    if body.announcement_recipients:
+        for part in [p.strip() for p in body.announcement_recipients.split(",") if p.strip()]:
+            if "@" not in part:
+                raise HTTPException(400, f"Invalid announcement recipient email: {part}")
+    return save_org_settings(body)
+
 # Helper endpoint to create/update event manually (for testing)
 @app.post("/events")
 def create_event(ev: Event):
     ev.ensure_id()
     save_event(ev)
     return ev
+
+# Serve frontend static files (built with Vite)
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import pathlib
+
+FRONTEND_DIST = pathlib.Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+
+logger.info(f"FRONTEND_DIST = {FRONTEND_DIST}, exists={FRONTEND_DIST.exists()}, index_exists={(FRONTEND_DIST / 'index.html').exists()}")
+
+if FRONTEND_DIST.exists():
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
+    
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        # API routes that should NOT serve index.html (let FastAPI handle them)
+        api_prefixes = ("api/", "chat", "test")
+        is_api = any(full_path.startswith(p) for p in api_prefixes)
+        logger.info(f"SPA catch-all: full_path='{full_path}', is_api={is_api}")
+        if is_api:
+            raise HTTPException(404, "Not found")
+        # Serve index.html for all other routes (React Router handles them)
+        index_file = FRONTEND_DIST / "index.html"
+        logger.info(f"index_file = {index_file}, exists={index_file.exists()}")
+        if index_file.exists():
+            return FileResponse(index_file)
+        raise HTTPException(404, "Frontend not built")

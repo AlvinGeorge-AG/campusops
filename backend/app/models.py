@@ -1,5 +1,5 @@
 from enum import Enum
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional
 from datetime import datetime
 import uuid
@@ -46,4 +46,26 @@ class Event(BaseModel):
             self.id = str(uuid.uuid4())[:8]
         if not self.created_at:
             self.created_at = datetime.utcnow().isoformat()
+        return self
+
+
+class OrgSettings(BaseModel):
+    org: str  # e.g. "FOSS MEC" - primary key
+    institution_name: str = "Govt. Model Engineering College"
+    institution_place: str = "Thrikkakara"
+    faculty_email: str = "principal@example.com"  # principal / approval email
+    announcement_recipients: str = "students@example.com"  # comma-separated
+    chairperson: str = ""
+    staff_in_charge: str = ""
+    updated_at: str = ""
+
+    @field_validator("org")
+    @classmethod
+    def org_not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("org must not be empty")
+        return v.strip()
+
+    def ensure_updated(self):
+        self.updated_at = datetime.utcnow().isoformat()
         return self

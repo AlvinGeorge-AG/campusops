@@ -2,11 +2,26 @@ import os
 from strands import tool
 from ..config import INSTITUTION_NAME, INSTITUTION_PLACE, DEFAULT_CHAIRPERSON, DEFAULT_STAFF
 
-# High-quality templates based on real MACS letters provided by user
-PERMISSION_TEMPLATE = f"""To,
+# Templates now built dynamically per org - see _get_templates()
+
+def _get_templates(org: str = ""):
+    """Resolve institution name/place dynamically from org settings, fallback to env config."""
+    inst_name = INSTITUTION_NAME
+    inst_place = INSTITUTION_PLACE
+    if org:
+        try:
+            from ..state import get_org_settings
+            s = get_org_settings(org)
+            if s.institution_name:
+                inst_name = s.institution_name
+            if s.institution_place:
+                inst_place = s.institution_place
+        except:
+            pass
+    perm_tmpl = f"""To,
 The Principal,
-{INSTITUTION_NAME},
-{INSTITUTION_PLACE}.
+{inst_name},
+{inst_place}.
 
 Subject: Request for permission to host "{{title}}"
 
@@ -28,10 +43,10 @@ Staff In Charge {{org}}
 {{staff}}
 """
 
-ONFOOT_TEMPLATE = f"""To,
+    onfoot_tmpl = f"""To,
 The Principal,
-{INSTITUTION_NAME},
-{INSTITUTION_PLACE}.
+{inst_name},
+{inst_place}.
 
 Subject: Request for On-foot Publicity for "{{title}}"
 
@@ -53,30 +68,45 @@ Chairperson {{org}}
 Staff In Charge {{org}}
 {{staff}}
 """
+    return perm_tmpl, onfoot_tmpl
+
+def _resolve_defaults(org, chairperson, staff):
+    """Pull chairperson/staff from org settings if not provided."""
+    if (not chairperson or not staff) and org:
+        try:
+            from ..state import get_org_settings
+            s = get_org_settings(org)
+            if not chairperson and s.chairperson:
+                chairperson = s.chairperson
+            if not staff and s.staff_in_charge:
+                staff = s.staff_in_charge
+        except:
+            pass
+    chairperson = chairperson or DEFAULT_CHAIRPERSON
+    staff = staff or DEFAULT_STAFF
+    return chairperson, staff
 
 def _build_letters(org, title, date, start, end, room, speaker, purpose, chairperson, staff):
     start = start or "10:00 AM"
     end = end or "12:00 PM"
     speaker_line = f"The session will be delivered by {speaker}." if speaker else ""
     purpose_line = purpose if purpose else f"The event aims to provide valuable learning and engagement for students."
-    # More detailed speaker para if speaker present
     if speaker and "Alumni" in speaker:
         speaker_para = f"Through this interactive session, students will gain valuable insights from the speaker's academic and professional journey, along with practical advice on career growth, industry expectations, and opportunities beyond college. The session aims to inspire students by connecting them with a distinguished guest and encouraging meaningful interaction."
     elif speaker:
         speaker_para = f"The session will feature {speaker}, who will share experiences and valuable insights with students, providing practical guidance and inspiration as they prepare for their own academic and professional careers."
     else:
         speaker_para = ""
-    chairperson = chairperson or DEFAULT_CHAIRPERSON
-    staff = staff or DEFAULT_STAFF
-    perm = PERMISSION_TEMPLATE.format(title=title, org=org, date=date, start=start, end=end, room=room, speaker_line=speaker_line, purpose_line=purpose_line, speaker_para=speaker_para, chairperson=chairperson, staff=staff)
-    onfoot = ONFOOT_TEMPLATE.format(title=title, org=org, date=date, start=start, end=end, room=room, speaker_line=speaker_line, purpose_line=purpose_line, speaker_para=speaker_para, chairperson=chairperson, staff=staff)
+    chairperson, staff = _resolve_defaults(org, chairperson, staff)
+    perm_tmpl, onfoot_tmpl = _get_templates(org)
+    perm = perm_tmpl.format(title=title, org=org, date=date, start=start, end=end, room=room, speaker_line=speaker_line, purpose_line=purpose_line, speaker_para=speaker_para, chairperson=chairperson, staff=staff)
+    onfoot = onfoot_tmpl.format(title=title, org=org, date=date, start=start, end=end, room=room, speaker_line=speaker_line, purpose_line=purpose_line, speaker_para=speaker_para, chairperson=chairperson, staff=staff)
     return perm.strip(), onfoot.strip()
 
 @tool
 def generate_permission_letter(organization: str, event_title: str, date: str, start_time: str, end_time: str, room: str, speaker: str = "", purpose: str = "", chairperson: str = "", staff_in_charge: str = "") -> str:
     """Generate high-quality permission letter for principal. Returns the letter text."""
     perm, _ = _build_letters(organization, event_title, date, start_time, end_time, room, speaker, purpose, chairperson, staff_in_charge)
-    # Also persist to latest event
     try:
         from ..state import get_latest_event, save_event
         ev = get_latest_event()

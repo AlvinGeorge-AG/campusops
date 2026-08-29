@@ -25,7 +25,19 @@ def draft_permission_email(organization: str, event_title: str, date: str, room:
     Returns:
         Status string with draft id or mock message.
     """
+    # Resolve dynamic org settings: faculty_email / chairperson / staff per club
     faculty_email = FACULTY_EMAIL
+    try:
+        from ..state import get_org_settings
+        _s = get_org_settings(organization)
+        if _s.faculty_email:
+            faculty_email = _s.faculty_email
+        if not chairperson and _s.chairperson:
+            chairperson = _s.chairperson
+        if not staff_in_charge and _s.staff_in_charge:
+            staff_in_charge = _s.staff_in_charge
+    except:
+        pass
     mock_mode = MOCK_MODE
 
     subject = f"Permission Request — {organization} {event_title} on {date}"

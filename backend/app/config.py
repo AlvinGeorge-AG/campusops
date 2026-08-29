@@ -17,18 +17,19 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.file",
 ]
 
-# Institution (was hardcoded in letters.py / email.py / main.py)
-INSTITUTION_NAME = "Govt. Model Engineering College"
-INSTITUTION_PLACE = "Thrikkakara"
-DEFAULT_ORG = "FOSS MEC"
-DEFAULT_CHAIRPERSON = "Arthana Sreekesh"
-DEFAULT_STAFF = "Aysha Fymin Majeed"
+# Institution fallbacks (overridden per-org via Settings UI → org_settings table)
+# Previously hard-coded; now dynamic. These env fallbacks only used when no org-specific setting exists.
+INSTITUTION_NAME = _env("INSTITUTION_NAME", "Govt. Model Engineering College")
+INSTITUTION_PLACE = _env("INSTITUTION_PLACE", "Thrikkakara")
+DEFAULT_ORG = _env("DEFAULT_ORG", "FOSS MEC")
+DEFAULT_CHAIRPERSON = _env("DEFAULT_CHAIRPERSON", "Arthana Sreekesh")
+DEFAULT_STAFF = _env("DEFAULT_STAFF", "Aysha Fymin Majeed")
 
 # Database (absolute path to avoid CWD issues)
 DB_PATH = _env("DB_PATH", str(BASE_DIR / "events.db"))
 
 # Email
-FACULTY_EMAIL = _env("FACULTY_EMAIL", "principal@govtmec.ac.in")
+FACULTY_EMAIL = _env("FACULTY_EMAIL", "principal@example.com")
 ANNOUNCEMENT_RECIPIENTS = _env("ANNOUNCEMENT_RECIPIENTS", "students@example.com")
 
 # App settings
