@@ -25,8 +25,11 @@ DEFAULT_ORG = _env("DEFAULT_ORG", "FOSS MEC")
 DEFAULT_CHAIRPERSON = _env("DEFAULT_CHAIRPERSON", "Charles Xavier")
 DEFAULT_STAFF = _env("DEFAULT_STAFF", "Joby John")
 
-# Database (absolute path to avoid CWD issues)
+# Database (absolute path to avoid CWD issues) + Neon Postgres
 DB_PATH = _env("DB_PATH", str(BASE_DIR / "events.db"))
+DATABASE_URL = _env("DATABASE_URL", "").strip()  # Neon postgres pooled URL, e.g. postgres://user:pass@ep-xxx.neon.tech/db?sslmode=require
+USE_NATIVE_FORMS = _env("USE_NATIVE_FORMS", "true").lower() == "true"  # native DB forms vs Google Forms
+NATIVE_FORM_CACHE_TTL = int(_env("NATIVE_FORM_CACHE_TTL", "60"))  # seconds for on-demand cache
 
 # Email
 FACULTY_EMAIL = _env("FACULTY_EMAIL", "principal@example.com")

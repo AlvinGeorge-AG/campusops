@@ -71,6 +71,18 @@ Seats are limited. Please register soon.
     if reused:
         subject += " (pre-approved)"
 
+    # Ensure registration_link is absolute (fix /r/xxx relative bug)
+    if registration_link.startswith("/r/"):
+        try:
+            from ..config import FRONTEND_ORIGIN
+            base = (FRONTEND_ORIGIN or "").rstrip("/")
+            if base and base != "*" and "localhost" not in base:
+                registration_link = f"{base}{registration_link}"
+            elif base:
+                registration_link = f"{base}{registration_link}"
+        except:
+            pass
+
     if mock_mode:
         return f"[MOCK] Announcement prepared for {recipients} | Subject: {subject} | Link: {registration_link}"
 

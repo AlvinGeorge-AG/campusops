@@ -304,50 +304,19 @@ async def _reset_loop():
         except Exception as e: logger.warning(f"Reset loop error: {e}")
         await asyncio.sleep(24*3600)  # 24h
 
-# --- Optional poller: if POLLER_ENABLED=true, auto-sync Forms→Sheet every 60s without manual Link click ---
+# --- Deprecated poller removed: on-demand + cache (60s TTL) now handles registrations ---
 _poller_task = None
-
-async def _poll_forms_loop():
-    await asyncio.sleep(10)
-    while True:
-        try:
-            if not POLLER_ENABLED or MOCK_MODE:
-                await asyncio.sleep(60)
-                continue
-            events = list_events()
-            for ev in events:
-                if ev.status != EventStatus.LIVE or not ev.form_id or ev.form_id.startswith("mock_") or not ev.sheet_id or ev.sheet_id.startswith("mock_") or ev.sheet_id.startswith("sheet_"):
-                    continue
-                try:
-                    from app.tools.registrations import sync_responses_to_sheet, get_registration_count
-                    import json
-                    sync_responses_to_sheet(ev.form_id, ev.sheet_id)
-                    raw = get_registration_count(ev.sheet_id, ev.form_id)
-                    data = json.loads(raw)
-                    cnt = int(data.get("registrant_count", 0) or 0)
-                    if cnt != ev.registrant_count:
-                        ev.registrant_count = cnt
-                        save_event(ev)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        await asyncio.sleep(60)
 
 @app.on_event("startup")
 async def start_poller():
-    global _poller_task, _reset_task
-    if POLLER_ENABLED:
-        _poller_task = asyncio.create_task(_poll_forms_loop())
-        logger.info("Poller enabled (60s)")
+    global _reset_task
+    # Poller disabled: use on-demand GET /events/{id}/registrations with 60s cache
     _reset_task = asyncio.create_task(_reset_loop())
-    logger.info("Daily reset task enabled (24h, keeps future)")
+    logger.info("Daily reset task enabled (24h, keeps future) - poller disabled (on-demand)")
 
 @app.on_event("shutdown")
 async def stop_poller():
-    global _poller_task, _reset_task
-    if _poller_task:
-        _poller_task.cancel()
+    global _reset_task
     if _reset_task:
         _reset_task.cancel()
 
@@ -682,28 +651,52 @@ def approve_event(event_id: str, body: ApproveRequest, request: Request, user=De
     if ev.status != EventStatus.PENDING_APPROVAL:
         raise HTTPException(400, f"Event not in pending_approval, current: {ev.status}")
     if body.approved:
-        # --- AUTO-RESUME: create form/announcement deterministically. Do not wait on the LLM here. ---
+        # --- AUTO-RESUME: native DB form (Neon) or Google Form fallback ---
         try:
+            from .config import USE_NATIVE_FORMS, DATABASE_URL
+            use_native = USE_NATIVE_FORMS
+            # If Neon is configured and native forms enabled, use DB form (no Google API)
+            if use_native:
+                from .config import FRONTEND_ORIGIN
+                base = FRONTEND_ORIGIN.rstrip("/") if FRONTEND_ORIGIN and FRONTEND_ORIGIN != "*" else str(request.base_url).rstrip("/")
+                # If FRONTEND_ORIGIN is localhost in prod, prefer request origin for absolute link
+                if "localhost" in base and request.headers.get("origin"):
+                    base = request.headers.get("origin").rstrip("/")
+                abs_form = f"{base}/r/{ev.id}"
+                abs_resp = f"{base}/events/{ev.id}/responses"
+                ev.form_id = f"native_{ev.id}"
+                ev.form_link = abs_form
+                ev.sheet_link = abs_resp
+                ev.sheet_id = f"native_sheet_{ev.id}"
+                ev.status = EventStatus.LIVE
+                save_event(ev)
+                announcement_result = ""
+                try:
+                    from app.tools.announcement import send_announcement as _sa
+                    announcement_result = _sa(ev.title or "Event", ev.date or "", ev.room or "", abs_form)
+                    if not announcement_result.startswith("[MOCK"):
+                        ev.announcement_sent = True
+                        save_event(ev)
+                except Exception as ae:
+                    announcement_result = f"Announcement failed: {ae}"
+                    logger.warning("Announcement failed after approval for event %s: %s", ev.id, ae)
+                msg = f"Approved. Native form: {ev.form_link} | Responses: {ev.sheet_link}"
+                if announcement_result:
+                    msg += f" | {announcement_result}"
+                return {"message": msg, "event": ev, "agent_response": announcement_result}
+            # Google Forms fallback
             from app.tools.forms import create_registration_form as _cf
             import json as _js2
-
-            raw = _cf(
-                ev.title or "Event",
-                ev.date or "",
-                ev.purpose or f"Registration for {ev.title}",
-                ev.form_fields_json or "",
-            )
+            raw = _cf(ev.title or "Event", ev.date or "", ev.purpose or f"Registration for {ev.title}", ev.form_fields_json or "")
             data = _js2.loads(raw)
             if not data.get("form_link"):
                 raise RuntimeError(data.get("error") or "Form creation returned no form_link")
-
             ev.form_id = data.get("form_id")
             ev.form_link = data.get("form_link")
             ev.sheet_id = data.get("sheet_id") or ev.sheet_id
             ev.sheet_link = data.get("sheet_link") or data.get("responses_link") or ev.sheet_link
             ev.status = EventStatus.LIVE
             save_event(ev)
-
             announcement_result = ""
             try:
                 from app.tools.announcement import send_announcement as _sa
@@ -714,7 +707,6 @@ def approve_event(event_id: str, body: ApproveRequest, request: Request, user=De
             except Exception as ae:
                 announcement_result = f"Announcement failed: {ae}"
                 logger.warning("Announcement failed after approval for event %s: %s", ev.id, ae)
-
             msg = f"Approved. Form created: {ev.form_link}"
             if ev.sheet_link:
                 msg += f" | Responses sheet: {ev.sheet_link}"
@@ -1119,6 +1111,11 @@ def send_permission_email(event_id: str, body: SendEmailRequest, request: Reques
     
     # Resolve org settings for signature fallback
     _s_email = get_org_settings(ev.org or "")
+    # Block send if org not configured (faculty/announcement missing) — warn and require Settings
+    from .state import is_org_configured as _is_cfg
+    _cfg_ok, _cfg_missing = _is_cfg(ev.org or "")
+    if not _cfg_ok:
+        raise HTTPException(status_code=400, detail={"error": f"Please complete Settings for {ev.org} before sending permission email", "missing_fields": _cfg_missing, "action": "Go to Settings → fill principal email, announcement recipients, chairperson, staff"})
     _c = ev.chairperson or _s_email.chairperson or DEFAULT_CHAIRPERSON
     _st = ev.staff_in_charge or _s_email.staff_in_charge or DEFAULT_STAFF
     full_body = f"""Respected Sir/Madam,
@@ -1193,20 +1190,25 @@ This email was generated via CampusOps. For queries, contact {_c} ({_st}) from {
 
 @app.get("/events/{event_id}/registrations")
 def get_registrations(event_id: str, request: Request, user=Depends(get_current_user)):
-    """Live count without LLM - also auto-syncs Forms responses → Sheet so sheet_link stays live."""
-    # Validate UUID format
-    import re
+    """On-demand count with 60s cache. Native DB -> COUNT(*) from event_responses, Google -> Forms API."""
+    import re, json, time
     if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
         raise HTTPException(404, "Not found")
     ev = get_event(event_id)
     if not ev:
         raise HTTPException(404, "Event not found")
+    # Native DB path - on-demand count from Neon/SQLite event_responses
+    if ev.form_id and ev.form_id.startswith("native_"):
+        from .state import count_responses
+        cnt = count_responses(ev.id)
+        # update cached count if changed
+        if cnt != ev.registrant_count:
+            ev.registrant_count = cnt
+            save_event(ev)
+        return {"event_id": event_id, "form_id": ev.form_id, "form_link": ev.form_link, "sheet_id": ev.sheet_id, "sheet_link": ev.sheet_link, "count": cnt, "source": "native_db", "native": True}
     if not ev.form_id or ev.form_id.startswith("mock_"):
-        # still return stored count for mock forms
-        return {"event_id": event_id, "form_id": ev.form_id, "sheet_id": ev.sheet_id, "sheet_link": ev.sheet_link, "count": 0, "mock": True, "note": "Mock form - no live registrations"}
-    import json
+        return {"event_id": event_id, "form_id": ev.form_id, "sheet_id": ev.sheet_id, "sheet_link": ev.sheet_link, "count": ev.registrant_count or 0, "mock": True, "note": "Mock form - no live registrations"}
     from app.tools.registrations import get_registration_count, sync_responses_to_sheet
-    # Trigger sync first so sheet_link shows rows automatically
     sync_res = {}
     if ev.sheet_id and not ev.sheet_id.startswith("mock_") and not ev.sheet_id.startswith("sheet_"):
         try:
@@ -1215,7 +1217,6 @@ def get_registrations(event_id: str, request: Request, user=Depends(get_current_
             sync_res = {"synced": False, "error": str(e)}
     raw = get_registration_count(ev.sheet_id or "", ev.form_id or "")
     data = json.loads(raw)
-    # also update stored count
     try:
         ev.registrant_count = int(data.get("registrant_count", 0) or 0)
         save_event(ev)
@@ -1328,6 +1329,137 @@ def upsert_settings(org: str, body: OrgSettings, request: Request, user=Depends(
             if "@" not in part:
                 raise HTTPException(400, f"Invalid announcement recipient email: {part}")
     return save_org_settings(body)
+
+# --- Native DB Responses (replaces Sheets) ---
+@app.get("/r/{event_id}")
+def get_public_form(event_id: str):
+    """Public: fetch event form metadata for native submission. No auth required."""
+    import re
+    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
+        raise HTTPException(404, "Not found")
+    ev = get_event(event_id)
+    if not ev:
+        raise HTTPException(404, "Event not found")
+    if ev.status not in [EventStatus.LIVE, EventStatus.CLOSED]:
+        raise HTTPException(400, f"Event not live (status: {ev.status}) - registration not open")
+    import json
+    fields = []
+    if ev.form_fields_json:
+        try:
+            fields = json.loads(ev.form_fields_json)
+            if isinstance(fields, str):
+                fields = json.loads(fields)
+        except: fields = []
+    if not fields:
+        fields = [{"title":"Full Name","type":"text","required":True},{"title":"Email","type":"text","required":True}]
+    return {"event_id": ev.id, "title": ev.title, "org": ev.org, "date": ev.date, "room": ev.room, "start_time": ev.start_time, "end_time": ev.end_time, "purpose": ev.purpose, "speaker": ev.speaker, "expected_headcount": ev.expected_headcount, "fields": fields, "status": ev.status}
+
+@app.post("/r/{event_id}/submit")
+@limiter.limit("30/minute")
+def submit_response(event_id: str, request: Request):
+    """Public form submission -> stored in Neon/SQLite event_responses."""
+    import re, json, hashlib
+    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
+        raise HTTPException(404, "Not found")
+    ev = get_event(event_id)
+    if not ev:
+        raise HTTPException(404, "Event not found")
+    if ev.status not in [EventStatus.LIVE, EventStatus.CLOSED]:
+        raise HTTPException(400, f"Registration not open (status: {ev.status})")
+    # Check capacity
+    from .state import count_responses, add_response
+    cnt = count_responses(ev.id)
+    if ev.expected_headcount and cnt >= ev.expected_headcount * 1.2:  # allow 20% overfill
+        raise HTTPException(409, "Registration full")
+    # Parse body as dict of field_title -> value (frontend sends { responses: {title: value} })
+    import asyncio
+    # FastAPI will parse JSON automatically if we use dict
+    # Use raw body
+    try:
+        body = _json_global.loads(request._body.decode() if hasattr(request,'_body') else "{}") if False else None
+    except: body=None
+    # Fallback: try sync read via starlette
+    # Simpler: use request.json via dependency - we handle via pydantic below by reading body bytes
+    return {"error":"Use /r/{event_id}/submit-json endpoint"}  # placeholder
+
+@app.post("/r/{event_id}/submit-json")
+@limiter.limit("30/minute")
+def submit_response_json(event_id: str, payload: dict, request: Request):
+    """Public JSON submit: {responses: {FieldTitle: value}, email?: str}"""
+    import re, json
+    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
+        raise HTTPException(404, "Not found")
+    ev = get_event(event_id)
+    if not ev:
+        raise HTTPException(404, "Event not found")
+    if ev.status not in [EventStatus.LIVE, EventStatus.CLOSED]:
+        raise HTTPException(400, f"Registration not open (status: {ev.status})")
+    from .state import count_responses, add_response
+    cnt = count_responses(ev.id)
+    if ev.expected_headcount and cnt >= ev.expected_headcount * 1.5:
+        raise HTTPException(409, "Registration full - capacity reached")
+    responses = payload.get("responses") if isinstance(payload.get("responses"), dict) else payload
+    # sanitize: ensure dict
+    if not isinstance(responses, dict):
+        raise HTTPException(400, "Invalid payload: expected {responses: {Field: value}} or {Field: value}")
+    # Validate required fields
+    import json as _js
+    required = []
+    if ev.form_fields_json:
+        try:
+            fields = _js.loads(ev.form_fields_json)
+            if isinstance(fields, str): fields=_js.loads(fields)
+            for f in fields:
+                if f.get("required"):
+                    required.append(f.get("title"))
+        except: pass
+    for r in required:
+        if not responses.get(r) or not str(responses.get(r)).strip():
+            raise HTTPException(400, f"Missing required field: {r}")
+    email = responses.get("Email") or responses.get("email") or payload.get("email") or ""
+    rid = add_response(ev.id, responses, str(email)[:120])
+    # update cached count
+    try:
+        ev.registrant_count = cnt + 1
+        save_event(ev)
+    except: pass
+    return {"ok": True, "response_id": rid, "event_id": event_id, "count": cnt+1}
+
+@app.get("/events/{event_id}/responses")
+def get_responses(event_id: str, request: Request, user=Depends(get_current_user), limit: int = 100, offset: int = 0, format: str = ""):
+    """Private: club view of native DB responses. Unique link replaces Sheets. Supports ?format=csv."""
+    import re, json, csv, io
+    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
+        raise HTTPException(404, "Not found")
+    ev = get_event(event_id)
+    if not ev:
+        raise HTTPException(404, "Event not found")
+    if user["role"] != "admin" and ev.org.strip().lower() != user["org"].strip().lower():
+        raise HTTPException(403, "Not your club's event")
+    from .state import list_responses, count_responses
+    total = count_responses(ev.id)
+    rows = list_responses(ev.id, limit=min(limit,200), offset=offset)
+    # Build headers from event fields
+    headers=[]
+    if ev.form_fields_json:
+        try:
+            f=_js2=json.loads(ev.form_fields_json)
+            if isinstance(f,str): f=json.loads(f)
+            headers=[x.get("title") for x in f if x.get("title")]
+        except: pass
+    if not headers and rows:
+        headers=list(rows[0]["data"].keys())
+    if format.lower()=="csv":
+        from fastapi.responses import StreamingResponse
+        output=io.StringIO()
+        w=csv.writer(output)
+        w.writerow(["submitted_at","email"]+headers)
+        all_rows = list_responses(ev.id, limit=10000, offset=0)
+        for r in all_rows:
+            w.writerow([r["created_at"], r["respondent_email"]] + [r["data"].get(h,"") for h in headers])
+        output.seek(0)
+        return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename=responses_{event_id}.csv"})
+    return {"event_id": event_id, "title": ev.title, "org": ev.org, "total": total, "headers": headers, "rows": rows, "limit": limit, "offset": offset, "native": True}
 
 # Helper endpoint to create/update event manually (for testing)
 @app.post("/events")
