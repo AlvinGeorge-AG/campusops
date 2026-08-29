@@ -162,7 +162,7 @@ def get_events():
 def get_one_event(event_id: str):
     # Validate UUID format to avoid catching frontend routes like /events/new
     import re
-    if not re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', event_id):
+    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
         raise HTTPException(404, "Not found")
     ev = get_event(event_id)
     if not ev:
@@ -173,7 +173,7 @@ def get_one_event(event_id: str):
 def approve_event(event_id: str, body: ApproveRequest):
     # Validate UUID format
     import re
-    if not re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', event_id):
+    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
         raise HTTPException(404, "Not found")
     ev = get_event(event_id)
     if not ev:
@@ -508,7 +508,7 @@ def send_permission_email(event_id: str, body: SendEmailRequest):
     """Club has reviewed/edited the draft shown in /chat. This sends it to principal/staff with PDFs attached."""
     # Validate UUID format
     import re
-    if not re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', event_id):
+    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
         raise HTTPException(404, "Not found")
     ev = get_event(event_id)
     if not ev:
@@ -629,7 +629,7 @@ def get_registrations(event_id: str):
     """Live count without LLM - also auto-syncs Forms responses → Sheet so sheet_link stays live."""
     # Validate UUID format
     import re
-    if not re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', event_id):
+    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
         raise HTTPException(404, "Not found")
     ev = get_event(event_id)
     if not ev:
@@ -661,7 +661,7 @@ def sync_event(event_id: str):
     """Force sync Forms responses → Sheet without LLM. Makes sheet_link show registrations."""
     # Validate UUID format
     import re
-    if not re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', event_id):
+    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
         raise HTTPException(404, "Not found")
     ev = get_event(event_id)
     if not ev:
@@ -677,7 +677,7 @@ def reset_event(event_id: str):
     """Testing helper: reset event to pending_approval and clear form/sheet so you can re-test approve. No auth."""
     # Validate UUID format
     import re
-    if not re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', event_id):
+    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
         raise HTTPException(404, "Not found")
     ev = get_event(event_id)
     if not ev:
@@ -700,7 +700,7 @@ def create_form_direct(event_id: str, body: FormCreateRequest):
     """Low-level deterministic form creation - frontend calls this with chip-selected fields (no LLM needed)."""
     # Validate UUID format
     import re
-    if not re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', event_id):
+    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
         raise HTTPException(404, "Not found")
     ev = get_event(event_id)
     if not ev:

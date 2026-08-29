@@ -4,9 +4,22 @@ from typing import List, Tuple
 import sib_api_v3_sdk
 from sib_api_v3_sdk.rest import ApiException
 
-BREVO_API_KEY = os.getenv("BREVO_API_KEY")
-FROM_EMAIL = os.getenv("FROM_EMAIL", "your-email@gmail.com")
-FROM_NAME = os.getenv("FROM_NAME", "CampusOps")
+def _get_brevo_config():
+    """Read Brevo config at call-time (not import-time) so dotenv ordering doesn't break it."""
+    # Ensure .env loaded if called outside FastAPI context (e.g., scripts)
+    try:
+        from dotenv import load_dotenv
+        from pathlib import Path
+        env_path = Path(__file__).resolve().parent.parent / ".env"
+        if env_path.exists():
+            load_dotenv(dotenv_path=env_path, override=False)
+    except Exception:
+        pass
+    return (
+        os.getenv("BREVO_API_KEY"),
+        os.getenv("FROM_EMAIL", "your-email@gmail.com"),
+        os.getenv("FROM_NAME", "CampusOps"),
+    )
 
 def send_permission_email(
     to_email: str,
@@ -18,8 +31,9 @@ def send_permission_email(
     Send email via Brevo (Sendinblue) API with PDF attachments.
     Returns: {"sent": True, "message_id": "..."} or raises Exception
     """
+    BREVO_API_KEY, FROM_EMAIL, FROM_NAME = _get_brevo_config()
     if not BREVO_API_KEY:
-        raise RuntimeError("BREVO_API_KEY not set")
+        raise RuntimeError("BREVO_API_KEY not set (check backend/.env)")
     
     configuration = sib_api_v3_sdk.Configuration()
     configuration.api_key['api-key'] = BREVO_API_KEY
@@ -49,4 +63,4 @@ def send_permission_email(
             "message_id": str(response.message_id)
         }
     except ApiException as e:
-        raise RuntimeError(f"Brevo API error: {e.body}")
+        raise RuntimeError(f"Brevo API error [{e.status} {e.reason}]: {e.body}")
