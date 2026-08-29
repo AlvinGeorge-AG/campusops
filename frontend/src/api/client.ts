@@ -95,7 +95,7 @@ export type ChatResp = { response: string; event_id: string | null; status: Even
 export type ApproveResp = { message: string; event: Event; agent_response?: string };
 export type RegistrationResp = { event_id: string; count: number; source?: string; sheet_link?: string | null; sheet_id?: string | null; mock?: boolean; sync?: unknown };
 
-export const chat = (data: ChatReq) => api.post<ChatResp>("/chat", data).then(r => r.data);
+export const chat = (data: ChatReq) => api.post<ChatResp>("/chat", data, { timeout: 70000 }).then(r => r.data);
 export const listEvents = (scope: "all" | "mine" = "all") => api.get<Event[]>(`/events?scope=${scope}`).then(r => r.data);
 export const getEvent = (id: string) => api.get<Event>(`/events/${id}`).then(r => r.data);
 export const approve = (id: string, approved: boolean) => api.post<ApproveResp>(`/events/${id}/approve`, { approved }).then(r => r.data);

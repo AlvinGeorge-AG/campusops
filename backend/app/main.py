@@ -27,6 +27,20 @@ import asyncio
 import logging
 import re
 import json as _json_global
+import threading
+
+_agent_invocation_lock = threading.Lock()
+
+class AgentBusyError(RuntimeError):
+    pass
+
+def _invoke_agent(agent, prompt):
+    if not _agent_invocation_lock.acquire(blocking=False):
+        raise AgentBusyError("Another agent request is still processing. Please wait for it to finish.")
+    try:
+        return agent(prompt)
+    finally:
+        _agent_invocation_lock.release()
 
 def _fields_to_json(fields):
     if not fields: return None
@@ -491,7 +505,7 @@ def approve_event(event_id: str, body: ApproveRequest, request: Request, user=De
                 f"{fields_note}{announcement_note}"
                 f"If no fields specified, use defaults. Persist with upsert_event including sheet_link.]"
             )
-            result = agent(resume_prompt)
+            result = _invoke_agent(agent, resume_prompt)
             # normalize agent response like chat does
             if isinstance(result, list):
                 parts = [b.get("text","") for b in result if isinstance(b, dict) and "text" in b]
@@ -681,7 +695,7 @@ def chat(req: ChatRequest, request: Request, user=Depends(get_current_user)):
     full_prompt = date_context + context + req.message
 
     try:
-        result = agent(full_prompt)
+        result = _invoke_agent(agent, full_prompt)
         # strands may return: AgentResult, string, or list of blocks like [{'text': ...}, {'reasoningContent': ...}]
         if isinstance(result, list):
             # join all text blocks
@@ -721,6 +735,8 @@ def chat(req: ChatRequest, request: Request, user=Depends(get_current_user)):
                             text = "\n".join(parts)
                 except:
                     pass
+    except AgentBusyError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         # Gemini 401 etc — fallback to deterministic letter generation instead of 500
         logger.warning(f"Agent fallback due to error: {e} — using deterministic letters/room")
@@ -897,7 +913,7 @@ def send_permission_email(event_id: str, body: SendEmailRequest, request: Reques
         try:
             agent = get_agent()
             prompt = f"[Event {ev.id} context: {ev.model_dump_json()}] Regenerate permission letter as per instruction: {body.regenerate_instruction}. Use generate_permission_letter and generate_onfoot_letter if needed, then upsert."
-            agent(prompt)
+            _invoke_agent(agent, prompt)
             ev = get_event(event_id)  # reload after regeneration
         except Exception as e:
             raise HTTPException(500, f"Regeneration failed: {e}")
