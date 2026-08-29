@@ -36,3 +36,4 @@ ANNOUNCEMENT_RECIPIENTS = _env("ANNOUNCEMENT_RECIPIENTS", "students@example.com"
 MOCK_MODE = _env("MOCK_MODE", "false").lower() == "true"
 POLLER_ENABLED = _env("POLLER_ENABLED", "false").lower() == "true"
 GEMINI_MODEL_ID = _env("GEMINI_MODEL_ID", "gemini-3.5-flash-lite")
+GEMINI_TIMEOUT_MS = int(_env("GEMINI_TIMEOUT_MS", "45000"))
