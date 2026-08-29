@@ -13,7 +13,8 @@ def _get_pg_pool():
         return _pool
     try:
         from psycopg_pool import ConnectionPool
-        _pool = ConnectionPool(conninfo=DATABASE_URL, min_size=1, max_size=5, timeout=10, open=True, kwargs={"autocommit": True})
+        # Reduced to 1 connection for Render free tier (512MB) to save memory
+        _pool = ConnectionPool(conninfo=DATABASE_URL, min_size=1, max_size=1, timeout=10, open=True, kwargs={"autocommit": True})
         return _pool
     except Exception as e:
         return None

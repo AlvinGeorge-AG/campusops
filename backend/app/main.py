@@ -146,16 +146,12 @@ def _create_event_deterministically(req: "ChatRequest", user: dict, event_id: st
         raise HTTPException(status_code=404, detail="Event placeholder not found")
 
     headcount = _extract_expected_headcount(req.message)
-    # Wrap room check with timeout to prevent hanging on Sheets/Neon (Render 30s proxy)
     try:
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(check_room_availability, req.date or "", headcount, req.start_time or "", req.end_time or "")
-            raw_av = fut.result(timeout=2.0)
+        raw_av = check_room_availability(req.date or "", headcount, req.start_time or "", req.end_time or "")
         availability = _js.loads(raw_av)
     except Exception as e:
-        logger.warning(f"Room check timeout/fail for {event_id}: {e}, using mock fallback")
-        availability = {"available": True, "room": "SDPK", "capacity": 60, "source": "mock_fallback_timeout"}
+        logger.warning(f"Room check failed for {event_id}: {e}, using mock fallback")
+        availability = {"available": True, "room": "SDPK", "capacity": 60, "source": "mock_fallback"}
     if availability.get("available") is False or not availability.get("room"):
         try:
             from app.state import get_conn as _gc2
@@ -178,16 +174,12 @@ def _create_event_deterministically(req: "ChatRequest", user: dict, event_id: st
             pass
         raise HTTPException(status_code=409, detail=availability)
 
-    # Booking with fast timeout to prevent hanging on Sheets
     try:
-        import concurrent.futures as _cf2
-        with _cf2.ThreadPoolExecutor(max_workers=1) as ex2:
-            fut2 = ex2.submit(book_room_slot, availability["room"], req.date or "", req.start_time or "", req.end_time or "", event_id)
-            raw_book = fut2.result(timeout=2.0)
+        raw_book = book_room_slot(availability["room"], req.date or "", req.start_time or "", req.end_time or "", event_id)
         booking = _js.loads(raw_book)
     except Exception as e:
-        logger.warning(f"Room booking timeout/fail for {event_id}: {e}, proceeding with mock ledger")
-        booking = {"booked": True, "room": availability["room"], "source": "mock_ledger_timeout"}
+        logger.warning(f"Room booking failed for {event_id}: {e}, proceeding with mock ledger")
+        booking = {"booked": True, "room": availability["room"], "source": "mock_ledger_fallback"}
     if booking.get("booked") is False and booking.get("reason") == "conflict":
         raise HTTPException(status_code=409, detail=booking)
     if booking.get("booked") is False:
@@ -1570,9 +1562,12 @@ import pathlib
 
 FRONTEND_DIST = pathlib.Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 
-logger.info(f"FRONTEND_DIST = {FRONTEND_DIST}, exists={FRONTEND_DIST.exists()}, index_exists={(FRONTEND_DIST / 'index.html').exists()}")
+# Only serve frontend via backend in local dev (when using SQLite). On Render with Neon (prod), frontend is on Vercel, skip to save memory
+from app.config import DATABASE_URL as _FRONT_DB_URL
+_should_serve_frontend = FRONTEND_DIST.exists() and not (_FRONT_DB_URL and _FRONT_DB_URL.strip())
+logger.info(f"FRONTEND_DIST = {FRONTEND_DIST}, exists={FRONTEND_DIST.exists()}, index_exists={(FRONTEND_DIST / 'index.html').exists()}, serve_frontend={_should_serve_frontend}")
 
-if FRONTEND_DIST.exists():
+if _should_serve_frontend:
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
     
     @app.get("/{full_path:path}")
