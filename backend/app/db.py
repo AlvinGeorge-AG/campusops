@@ -8,8 +8,6 @@ USE_POSTGRES = bool(DATABASE_URL and DATABASE_URL.strip())
 _pool = None
 
 def _get_pg_pool():
-    return None
-def _get_pg_pool_old():
     global _pool
     if _pool is not None:
         return _pool
@@ -18,7 +16,6 @@ def _get_pg_pool_old():
         _pool = ConnectionPool(conninfo=DATABASE_URL, min_size=1, max_size=5, timeout=10, open=True, kwargs={"autocommit": True})
         return _pool
     except Exception as e:
-        # fallback: try single connection
         return None
 
 def is_postgres() -> bool:
