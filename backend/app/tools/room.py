@@ -201,6 +201,9 @@ def check_room_availability(date: str, capacity: int, start_time: str = "", end_
     base_rooms = {}
     if not mock_mode:
         try:
+            import socket
+            orig_timeout = socket.getdefaulttimeout()
+            socket.setdefaulttimeout(2.5)
             from ..google.auth import get_credentials
             from googleapiclient.discovery import build
             creds = get_credentials()
@@ -208,7 +211,8 @@ def check_room_availability(date: str, capacity: int, start_time: str = "", end_
             if creds and sheet_id:
                 service = build("sheets", "v4", credentials=creds)
                 base_rooms, sheet_bookings, _ = _read_inventory_and_bookings(service, sheet_id)
-        except:
+            socket.setdefaulttimeout(orig_timeout)
+        except Exception:
             pass
 
     if not base_rooms:
