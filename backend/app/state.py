@@ -195,6 +195,40 @@ def get_conn():
     except: pass
     return conn
 
+# Postgres DDLs
+CREATE_ORG_SETTINGS_TABLE_PG = """
+CREATE TABLE IF NOT EXISTS org_settings (
+    org TEXT PRIMARY KEY,
+    data JSONB NOT NULL
+);
+"""
+
+CREATE_USERS_TABLE_PG = """
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT UNIQUE NOT NULL,
+    org TEXT NOT NULL,
+    role TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    is_sandbox INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+"""
+
+CREATE_ROOM_BOOKINGS_TABLE_PG = """
+CREATE TABLE IF NOT EXISTS room_bookings (
+    id TEXT PRIMARY KEY,
+    org TEXT NOT NULL,
+    room TEXT NOT NULL,
+    date TEXT NOT NULL,
+    start_min INTEGER NOT NULL,
+    end_min INTEGER NOT NULL,
+    event_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(room, date, start_min, end_min)
+);
+"""
+
 _pg_schema_done = False
 def _ensure_pg_schema(conn):
     global _pg_schema_done
@@ -203,14 +237,19 @@ def _ensure_pg_schema(conn):
     # autocommit=True so each DDL is atomic, ignore errors individually
     for stmt in [
         CREATE_TABLE_PG,
+        CREATE_ORG_SETTINGS_TABLE_PG,
+        CREATE_USERS_TABLE_PG,
+        CREATE_ROOM_BOOKINGS_TABLE_PG,
         CREATE_RESPONSES_TABLE_PG,
         "CREATE INDEX IF NOT EXISTS idx_events_org ON events(org)",
         "CREATE INDEX IF NOT EXISTS idx_events_date ON events(date)",
+        "CREATE INDEX IF NOT EXISTS idx_room_bookings_room_date ON room_bookings(room, date)",
         "CREATE INDEX IF NOT EXISTS idx_responses_event ON event_responses(event_id)",
     ]:
         try:
             conn.execute(stmt)
-        except: pass
+        except Exception:
+            pass
     for stmt in [
         "ALTER TABLE org_settings ALTER COLUMN data TYPE JSONB USING data::jsonb",
         "ALTER TABLE events ALTER COLUMN data TYPE JSONB USING data::jsonb",
@@ -218,7 +257,8 @@ def _ensure_pg_schema(conn):
     ]:
         try:
             conn.execute(stmt)
-        except: pass
+        except Exception:
+            pass
     _pg_schema_done = True
 
 def _pg_ensure(conn):

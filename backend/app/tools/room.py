@@ -294,17 +294,15 @@ def book_room_slot(room: str, date: str, start_time: str, end_time: str, event_i
         if avail.get("available") is False and any(c["room"].lower()==room.lower() for c in avail.get("conflicts",[])):
             return json.dumps({"booked": False, "error": f"Sheet conflict: {room} {date} {start_time}-{end_time}", "reason": "conflict", "conflicts": avail.get("conflicts",[])})
 
-        ok = add_room_booking(org="unknown", room=room, date=date, start_min=s_min, end_min=e_min, event_id=event_id)
+        org_val = "unknown"
         try:
             from ..state import get_event
             ev = get_event(event_id)
             if ev and ev.org:
-                from ..state import get_conn
-                conn = get_conn()
-                conn.execute("UPDATE room_bookings SET org=? WHERE event_id=?", (ev.org, event_id))
-                conn.commit(); conn.close()
-        except:
+                org_val = ev.org
+        except Exception:
             pass
+        ok = add_room_booking(org=org_val, room=room, date=date, start_min=s_min, end_min=e_min, event_id=event_id)
         if not ok:
             conflicts2 = check_room_conflict(room, date, s_min, e_min)
             return json.dumps({"booked": False, "error": "DB conflict", "reason": "conflict", "conflicts": conflicts2})
