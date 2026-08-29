@@ -253,6 +253,9 @@ def chat(req: ChatRequest):
         _new = _Event()
         _new.ensure_id()
         _new.status = EventStatus.DRAFT
+        # Seed a useful title before the agent runs so deterministic fallback
+        # responses never leave the event as "Untitled event".
+        _new.title = _extract_title_from_message(req.message) or "Campus Event"
         # pre-seed 1-chat heart so even if agent fails, data isn't lost
         if req.start_time:
             _new.start_time = req.start_time

@@ -35,12 +35,4 @@ ANNOUNCEMENT_RECIPIENTS = _env("ANNOUNCEMENT_RECIPIENTS", "students@example.com"
 # App settings
 MOCK_MODE = _env("MOCK_MODE", "false").lower() == "true"
 POLLER_ENABLED = _env("POLLER_ENABLED", "false").lower() == "true"
-# `gemini-3.5-flash-lite` was never a supported model name and causes the
-# Gemini API to return an opaque 500 during Strands tool-call cycles. Keep an
-# explicit compatibility mapping so existing .env files are repaired too.
-_configured_gemini_model = _env("GEMINI_MODEL_ID", "gemini-2.5-flash-lite")
-GEMINI_MODEL_ID = (
-    "gemini-2.5-flash-lite"
-    if _configured_gemini_model == "gemini-3.5-flash-lite"
-    else _configured_gemini_model
-)
+GEMINI_MODEL_ID = _env("GEMINI_MODEL_ID", "gemini-3.5-flash-lite")
