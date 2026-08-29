@@ -8,6 +8,8 @@ USE_POSTGRES = bool(DATABASE_URL and DATABASE_URL.strip())
 _pool = None
 
 def _get_pg_pool():
+    return None
+def _get_pg_pool_old():
     global _pool
     if _pool is not None:
         return _pool
