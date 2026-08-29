@@ -109,22 +109,54 @@ def get_conn():
                 def cursor(self, *a, **kw):
                     return self._conn.cursor(*a, **kw)
                 def commit(self):
-                    return self._conn.commit()
+                    try:
+                        if not getattr(self._conn, "autocommit", False):
+                            return self._conn.commit()
+                    except Exception:
+                        pass
                 def rollback(self):
-                    return self._conn.rollback()
+                    try:
+                        if not getattr(self._conn, "autocommit", False):
+                            return self._conn.rollback()
+                    except Exception:
+                        pass
                 def close(self):
                     try:
-                        self._pool.putconn(self._conn)
-                    except:
+                        if self._pool and self._conn:
+                            self._pool.putconn(self._conn)
+                    except Exception:
                         pass
                 def __enter__(self): return self
                 def __exit__(self, *e): self.close()
             return PGPooledWrapper(pool)
         else:
-            conn = _pg_conn()
-            # wrap close
-            orig_close = conn.close
-            return conn
+            class PGDirectWrapper:
+                def __init__(self, conn):
+                    self._conn = conn
+                def execute(self, *a, **kw):
+                    return self._conn.execute(*a, **kw)
+                def cursor(self, *a, **kw):
+                    return self._conn.cursor(*a, **kw)
+                def commit(self):
+                    try:
+                        if not getattr(self._conn, "autocommit", False):
+                            return self._conn.commit()
+                    except Exception:
+                        pass
+                def rollback(self):
+                    try:
+                        if not getattr(self._conn, "autocommit", False):
+                            return self._conn.rollback()
+                    except Exception:
+                        pass
+                def close(self):
+                    try:
+                        self._conn.close()
+                    except Exception:
+                        pass
+                def __enter__(self): return self
+                def __exit__(self, *e): self.close()
+            return PGDirectWrapper(_pg_conn())
     # SQLite fallback - original logic
     import sqlite3
     from .config import DB_PATH
@@ -163,8 +195,10 @@ def get_conn():
     except: pass
     return conn
 
+_pg_schema_done = False
 def _ensure_pg_schema(conn):
-    if not _is_pg():
+    global _pg_schema_done
+    if not _is_pg() or _pg_schema_done:
         return
     # autocommit=True so each DDL is atomic, ignore errors individually
     for stmt in [
@@ -185,6 +219,7 @@ def _ensure_pg_schema(conn):
         try:
             conn.execute(stmt)
         except: pass
+    _pg_schema_done = True
 
 def _pg_ensure(conn):
     if _is_pg():

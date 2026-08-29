@@ -46,22 +46,38 @@ def get_db():
             conn = pool.getconn()
             try:
                 yield conn
-                conn.commit()
+                if not getattr(conn, "autocommit", False):
+                    conn.commit()
             except Exception:
-                conn.rollback()
+                try:
+                    if not getattr(conn, "autocommit", False):
+                        conn.rollback()
+                except Exception:
+                    pass
                 raise
             finally:
-                pool.putconn(conn)
+                try:
+                    pool.putconn(conn)
+                except Exception:
+                    pass
         else:
             conn = _pg_conn()
             try:
                 yield conn
-                conn.commit()
+                if not getattr(conn, "autocommit", False):
+                    conn.commit()
             except Exception:
-                conn.rollback()
+                try:
+                    if not getattr(conn, "autocommit", False):
+                        conn.rollback()
+                except Exception:
+                    pass
                 raise
             finally:
-                conn.close()
+                try:
+                    conn.close()
+                except Exception:
+                    pass
     else:
         conn = _sqlite_conn()
         try:

@@ -387,13 +387,34 @@ class ChatRequest(BaseModel):
         import re as _re, datetime as _dt
         v = v.strip()
         # Accept YYYY-MM-DD
-        if not _re.match(r"^\d{4}-\d{2}-\d{2}$", v):
-            raise ValueError("date must be YYYY-MM-DD")
-        try:
-            _dt.datetime.strptime(v, "%Y-%m-%d")
-        except:
-            raise ValueError("invalid date")
-        return v
+        if _re.match(r"^\d{4}-\d{2}-\d{2}$", v):
+            try:
+                _dt.datetime.strptime(v, "%Y-%m-%d")
+                return v
+            except:
+                raise ValueError("invalid date YYYY-MM-DD")
+        # Accept DD/MM/YYYY
+        if _re.match(r"^\d{1,2}/\d{1,2}/\d{4}$", v):
+            try:
+                d = _dt.datetime.strptime(v, "%d/%m/%Y")
+                return d.strftime("%Y-%m-%d")
+            except:
+                pass
+        # Accept DD-MM-YYYY
+        if _re.match(r"^\d{1,2}-\d{1,2}-\d{4}$", v):
+            try:
+                d = _dt.datetime.strptime(v, "%d-%m-%Y")
+                return d.strftime("%Y-%m-%d")
+            except:
+                pass
+        # Accept YYYY/MM/DD
+        if _re.match(r"^\d{4}/\d{1,2}/\d{1,2}$", v):
+            try:
+                d = _dt.datetime.strptime(v, "%Y/%m/%d")
+                return d.strftime("%Y-%m-%d")
+            except:
+                pass
+        raise ValueError("date must be YYYY-MM-DD (e.g. 2026-09-01 or 01/09/2026)")
 
     @field_validator("start_time", "end_time")
     @classmethod
@@ -764,8 +785,9 @@ def chat(req: ChatRequest, request: Request, user=Depends(get_current_user)):
     ready, missing = is_org_configured(user["org"])
     if not ready:
         raise HTTPException(status_code=400, detail={"error": f"Please complete Settings for {user['org']} before creating events", "missing_fields": missing, "action": "Go to Settings → fill institution, principal email, chairperson, staff, announcement recipients", "org": user["org"]})
-    # Drive check is blocking (except TEST_CLUB sandbox) — must connect before creating real events
-    if not is_google_connected(user["org"]):
+    # Drive check: if CENTRAL_DRIVE or USE_NATIVE_FORMS or MOCK_MODE, allow event creation
+    from .config import CENTRAL_DRIVE, USE_NATIVE_FORMS, MOCK_MODE
+    if not is_google_connected(user["org"]) and not (CENTRAL_DRIVE or USE_NATIVE_FORMS or MOCK_MODE):
         raise HTTPException(status_code=400, detail={"error": f"Google Drive not connected for {user['org']}", "reason": "drive_not_connected", "action": "Go to Settings → Connect Google Drive and approve drive.file/forms.body/spreadsheets permissions", "org": user["org"], "connect_url": f"/auth/google/url?org={user['org']}"})
 
     # 1-chat heart: persist all extra metadata upfront (time/speaker/purpose/onfoot etc)

@@ -31,12 +31,12 @@ def get_credentials(org: str | None = None):
                 with open(token_path, "w") as token:
                     token.write(creds.to_json())
                 return creds
-            except: pass
-        # Non-interactive: return None if interactive not possible (API mode)
-        if not os.path.exists(creds_path):
+            except Exception:
+                pass
+        # Never launch interactive browser server in backend API mode (prevents Render 502 server hang)
+        if os.getenv("ALLOW_INTERACTIVE_AUTH", "false").lower() != "true":
             return None
-        # Only run flow if called interactively (scripts/auth_google.py passes --org)
-        if org is None and os.getenv("ALLOW_INTERACTIVE_AUTH", "false").lower() != "true":
+        if not os.path.exists(creds_path):
             return None
         flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
         creds = flow.run_local_server(port=0)
