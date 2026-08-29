@@ -97,10 +97,7 @@ def create_agent():
     )
     return agent
 
-# Singleton for FastAPI
-_agent = None
+# No singleton for Render free tier (512MB) - create per-request and allow GC to save memory
+# Deterministic path (date+time provided) bypasses Gemini entirely, so most requests never load the model
 def get_agent():
-    global _agent
-    if _agent is None:
-        _agent = create_agent()
-    return _agent
+    return create_agent()

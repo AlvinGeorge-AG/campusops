@@ -8,16 +8,8 @@ USE_POSTGRES = bool(DATABASE_URL and DATABASE_URL.strip())
 _pool = None
 
 def _get_pg_pool():
-    global _pool
-    if _pool is not None:
-        return _pool
-    try:
-        from psycopg_pool import ConnectionPool
-        # Reduced to 1 connection for Render free tier (512MB) to save memory
-        _pool = ConnectionPool(conninfo=DATABASE_URL, min_size=1, max_size=1, timeout=10, open=True, kwargs={"autocommit": True})
-        return _pool
-    except Exception as e:
-        return None
+    # Disabled pooling for Render free tier (512MB) - direct connect per request saves idle memory
+    return None
 
 def is_postgres() -> bool:
     return USE_POSTGRES
