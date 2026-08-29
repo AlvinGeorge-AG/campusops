@@ -3,6 +3,9 @@ import base64
 from typing import List, Tuple
 import sib_api_v3_sdk
 from sib_api_v3_sdk.rest import ApiException
+import logging
+
+logger = logging.getLogger(__name__)
 
 def _get_brevo_config():
     """Read Brevo config at call-time (not import-time) so dotenv ordering doesn't break it."""
@@ -34,6 +37,10 @@ def send_permission_email(
     BREVO_API_KEY, FROM_EMAIL, FROM_NAME = _get_brevo_config()
     if not BREVO_API_KEY:
         raise RuntimeError("BREVO_API_KEY not set (check backend/.env)")
+    if not FROM_EMAIL or "@" not in FROM_EMAIL or FROM_EMAIL == "your-email@gmail.com":
+        raise RuntimeError("FROM_EMAIL is not configured with a verified Brevo sender (check backend/.env)")
+    if not to_email or "@" not in to_email:
+        raise RuntimeError(f"Principal recipient email is invalid: {to_email!r}")
     
     configuration = sib_api_v3_sdk.Configuration()
     configuration.api_key['api-key'] = BREVO_API_KEY
@@ -58,9 +65,11 @@ def send_permission_email(
     
     try:
         response = api_instance.send_transac_email(send_smtp_email)
+        logger.info("Permission email accepted by Brevo: to=%s message_id=%s", to_email, response.message_id)
         return {
             "sent": True,
             "message_id": str(response.message_id)
         }
     except ApiException as e:
+        logger.error("Brevo rejected permission email: to=%s status=%s reason=%s body=%s", to_email, e.status, e.reason, e.body)
         raise RuntimeError(f"Brevo API error [{e.status} {e.reason}]: {e.body}")

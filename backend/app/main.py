@@ -890,6 +890,8 @@ def send_permission_email(event_id: str, body: SendEmailRequest, request: Reques
     # RBAC: only owner org or admin (sandbox can send its own)
     if user["role"] != "admin" and ev.org.strip().lower() != user["org"].strip().lower():
         raise HTTPException(403, "Not your club's event")
+    if ev.permission_email_sent:
+        return {"sent": True, "already_sent": True, "to": get_org_settings(ev.org or "").faculty_email or FACULTY_EMAIL, "message_id": ev.permission_email_message_id, "event": ev}
     # Allow natural language regeneration via LLM
     if body.regenerate_instruction:
         try:
@@ -994,6 +996,10 @@ This email was generated via CampusOps. For queries, contact {_c} ({_st}) from {
             pdf_attachments=pdf_attachments
         )
         ev.email_draft = full_body
+        ev.permission_email_sent = True
+        ev.permission_email_message_id = result["message_id"]
+        from datetime import datetime, timezone
+        ev.permission_email_sent_at = datetime.now(timezone.utc).isoformat()
         save_event(ev)
         return {"sent": True, "to": faculty_email, "message_id": result["message_id"], "subject": subject, "event": ev}
     except Exception as e:
