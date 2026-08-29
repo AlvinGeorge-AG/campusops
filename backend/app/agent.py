@@ -4,6 +4,7 @@ load_dotenv()
 
 from strands import Agent
 from strands.models.gemini import GeminiModel
+from google.genai.types import HttpOptions
 from .tools import (
     check_room_availability,
     draft_permission_email,
@@ -14,7 +15,7 @@ from .tools import (
 from .tools.room import book_room_slot
 from .tools.letters import generate_permission_letter, generate_onfoot_letter, generate_announcement_preview
 from .tools.event_state import upsert_event
-from .config import GEMINI_MODEL_ID
+from .config import GEMINI_MODEL_ID, GEMINI_TIMEOUT_MS
 
 def _build_system_prompt():
     from datetime import datetime
@@ -69,7 +70,10 @@ def get_gemini_model():
     if not api_key or api_key == "your_gemini_api_key_here":
         raise ValueError("GEMINI_API_KEY not set. Get one from https://aistudio.google.com/apikey and set in backend/.env")
     return GeminiModel(
-        client_args={"api_key": api_key},
+        client_args={
+            "api_key": api_key,
+            "http_options": HttpOptions(timeout=GEMINI_TIMEOUT_MS),
+        },
         model_id=model_id,
         params={"temperature": 0.4}
     )
