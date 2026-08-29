@@ -151,7 +151,7 @@ def _create_event_deterministically(req: "ChatRequest", user: dict, event_id: st
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
             fut = ex.submit(check_room_availability, req.date or "", headcount, req.start_time or "", req.end_time or "")
-            raw_av = fut.result(timeout=5)
+            raw_av = fut.result(timeout=2.0)
         availability = _js.loads(raw_av)
     except Exception as e:
         logger.warning(f"Room check timeout/fail for {event_id}: {e}, using mock fallback")
@@ -178,12 +178,12 @@ def _create_event_deterministically(req: "ChatRequest", user: dict, event_id: st
             pass
         raise HTTPException(status_code=409, detail=availability)
 
-    # Booking with timeout to prevent hanging on Sheets
+    # Booking with fast timeout to prevent hanging on Sheets
     try:
         import concurrent.futures as _cf2
         with _cf2.ThreadPoolExecutor(max_workers=1) as ex2:
             fut2 = ex2.submit(book_room_slot, availability["room"], req.date or "", req.start_time or "", req.end_time or "", event_id)
-            raw_book = fut2.result(timeout=5)
+            raw_book = fut2.result(timeout=2.0)
         booking = _js.loads(raw_book)
     except Exception as e:
         logger.warning(f"Room booking timeout/fail for {event_id}: {e}, proceeding with mock ledger")
