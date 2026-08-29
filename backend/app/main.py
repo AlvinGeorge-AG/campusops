@@ -350,10 +350,18 @@ app.add_middleware(SlowAPIMiddleware)
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
     return JSONResponse(status_code=429, content={"error": "Rate limited", "detail": str(exc.detail)})
 
-# Use env FRONTEND_ORIGIN, allow sandbox TEST_CLUB header
-# Support comma-separated list and wildcard vercel preview deployments
-_allowed_origins = [o.strip() for o in FRONTEND_ORIGIN.split(",") if o.strip()] if FRONTEND_ORIGIN != "*" else ["*"]
-# Allow any vercel.app subdomain for preview deployments when not using "*"
+# Ensure all standard origins + any custom env origins are permitted
+_default_origins = [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:3000",
+    "http://localhost:8000",
+    "http://127.0.0.1:5173",
+    "https://campusops-ft.vercel.app",
+    "https://campusops.onrender.com",
+]
+_env_origins = [o.strip() for o in (os.getenv("FRONTEND_ORIGIN") or os.getenv("FRONTEND_URL") or FRONTEND_ORIGIN or "").split(",") if o.strip()]
+_allowed_origins = list(dict.fromkeys(_default_origins + _env_origins)) if FRONTEND_ORIGIN != "*" else ["*"]
 _vercel_regex = r"https://.*\.vercel\.app" if _allowed_origins != ["*"] else None
 app.add_middleware(
     CORSMiddleware,
