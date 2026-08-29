@@ -22,8 +22,8 @@ SCOPES = [
 INSTITUTION_NAME = _env("INSTITUTION_NAME", "Govt. Model Engineering College")
 INSTITUTION_PLACE = _env("INSTITUTION_PLACE", "Thrikkakara")
 DEFAULT_ORG = _env("DEFAULT_ORG", "FOSS MEC")
-DEFAULT_CHAIRPERSON = _env("DEFAULT_CHAIRPERSON", "Arthana Sreekesh")
-DEFAULT_STAFF = _env("DEFAULT_STAFF", "Aysha Fymin Majeed")
+DEFAULT_CHAIRPERSON = _env("DEFAULT_CHAIRPERSON", "Charles Xavier")
+DEFAULT_STAFF = _env("DEFAULT_STAFF", "Joby John")
 
 # Database (absolute path to avoid CWD issues)
 DB_PATH = _env("DB_PATH", str(BASE_DIR / "events.db"))

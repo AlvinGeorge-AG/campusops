@@ -274,6 +274,7 @@ def create_registration_form(event_title: str, event_date: str, description: str
         # Create linked response Sheet so we can return BOTH links (Forms API doesn't auto-link)
         sheet_link = ""
         sheet_id = ""
+        sheet_error = ""
         try:
             sheets_service = build("sheets", "v4", credentials=creds)
             sheet_title = f"{event_title} - Responses ({event_date})"
@@ -298,8 +299,8 @@ def create_registration_form(event_title: str, event_date: str, description: str
             except:
                 pass
         except Exception as se:
-            # sheet creation is bonus; form still succeeds
-            pass
+            sheet_error = str(se)
+            logger.warning("response sheet creation failed for form %s: %s", form_id, se)
 
         return _json.dumps({
             "form_id": form_id,
@@ -308,20 +309,19 @@ def create_registration_form(event_title: str, event_date: str, description: str
             "sheet_link": sheet_link,
             "responses_link": sheet_link,
             "description": description,
-            "upload_folder_link": upload_folder_link
+            "upload_folder_link": upload_folder_link,
+            "sheet_error": sheet_error
         })
     except Exception as e:
         # Surface real error in uvicorn logs so we can debug (don't hide)
-        import traceback
         logger.exception("CREATE FAILED: %s", e)
-        fake_id = f"mock_form_{event_title.replace(' ', '_')}"
         return _json.dumps({
-            "form_id": fake_id,
-            "form_link": f"https://docs.google.com/forms/d/{fake_id}/viewform",
-            "sheet_id": f"mock_sheet_{fake_id}",
-            "sheet_link": f"https://docs.google.com/spreadsheets/d/mock_sheet_{fake_id}",
-            "responses_link": f"https://docs.google.com/spreadsheets/d/mock_sheet_{fake_id}",
-            "mock": True,
+            "form_id": "",
+            "form_link": "",
+            "sheet_id": "",
+            "sheet_link": "",
+            "responses_link": "",
+            "mock": False,
             "error": str(e),
             "upload_folder_link": ""
         })

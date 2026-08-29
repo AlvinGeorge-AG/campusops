@@ -79,6 +79,158 @@ def _extract_title_from_message(msg: str) -> str:
         return cand.title()
     return ""
 
+def _extract_expected_headcount(msg: str) -> int:
+    if not msg:
+        return 30
+    patterns = [
+        r"for\s+(\d+)\s+students",
+        r"for\s+(\d+)\s+people",
+        r"(\d+)\s+students",
+        r"(\d+)\s+attendees",
+        r"headcount\s*(?:is|:)?\s*(\d+)",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, msg, re.IGNORECASE)
+        if m:
+            try:
+                return max(1, int(m.group(1)))
+            except Exception:
+                pass
+    return 30
+
+def _build_announcement_preview(ev: Event) -> str:
+    time_line = f"Time: {ev.start_time} - {ev.end_time}" if ev.start_time and ev.end_time else "Time: TBD"
+    speaker_line = f"Speaker: {ev.speaker}" if ev.speaker else ""
+    return f"""ANNOUNCEMENT PREVIEW (to be sent to students after approval):
+---
+Hello,
+
+We are excited to announce: {ev.title} by {ev.org}
+
+Date: {ev.date}
+Venue: {ev.room}
+{time_line}
+Expected: {ev.expected_headcount} students
+{speaker_line}
+Registration will open after approval - form link to be attached.
+
+Seats are limited. Please register soon.
+- CampusOps
+---"""
+
+def _chat_response_for_event(ev: Event, response_text: str) -> "ChatResponse":
+    email_preview = ev.email_draft or ev.permission_letter or ""
+    if not email_preview and ev.title:
+        _s_prev = get_org_settings(ev.org or "")
+        _inst_n = _s_prev.institution_name or INSTITUTION_NAME
+        _inst_p = _s_prev.institution_place or INSTITUTION_PLACE
+        _chair = ev.chairperson or _s_prev.chairperson or DEFAULT_CHAIRPERSON
+        email_preview = f"To,\nThe Principal,\n{_inst_n},\n{_inst_p}.\n\nSubject: Request for permission to host \"{ev.title}\"\n\nRespected Sir/Madam,\n\nI am writing to request permission to conduct \"{ev.title}\", organized by {ev.org}, on {ev.date} from {ev.start_time or '3:30 PM'} to {ev.end_time or '4:30 PM'} at {ev.room}.\n\n{ev.purpose or ''}\n\nThank you.\n\nWith regards,\nChairperson {ev.org}\n{_chair}"
+    return ChatResponse(
+        response=response_text,
+        event_id=ev.id,
+        status=ev.status,
+        permission_letter=ev.permission_letter or email_preview,
+        onfoot_letter=ev.onfoot_letter,
+        announcement_draft=ev.announcement_draft,
+        email_draft=email_preview,
+    )
+
+def _create_event_deterministically(req: "ChatRequest", user: dict, event_id: str) -> "ChatResponse":
+    from app.tools.room import check_room_availability, book_room_slot
+    from app.tools.letters import generate_permission_letter, generate_onfoot_letter
+    import json as _js
+
+    ev = get_event(event_id)
+    if not ev:
+        raise HTTPException(status_code=404, detail="Event placeholder not found")
+
+    headcount = _extract_expected_headcount(req.message)
+    availability = _js.loads(check_room_availability(req.date or "", headcount, req.start_time or "", req.end_time or ""))
+    if availability.get("available") is False or not availability.get("room"):
+        try:
+            import sqlite3
+            from app.config import DB_PATH
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("DELETE FROM events WHERE id=?", (event_id,))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+        raise HTTPException(status_code=409, detail=availability)
+
+    booking = _js.loads(book_room_slot(
+        availability["room"],
+        req.date or "",
+        req.start_time or "",
+        req.end_time or "",
+        event_id,
+    ))
+    if booking.get("booked") is False and booking.get("reason") == "conflict":
+        raise HTTPException(status_code=409, detail=booking)
+    if booking.get("booked") is False:
+        logger.warning("Room sheet booking warning for event %s: %s", event_id, booking)
+
+    settings = get_org_settings(user["org"])
+    ev.org = user["org"]
+    ev.title = _extract_title_from_message(req.message) or ev.title or "Campus Event"
+    ev.date = req.date or ev.date
+    ev.start_time = req.start_time or ev.start_time
+    ev.end_time = req.end_time or ev.end_time
+    ev.expected_headcount = headcount
+    ev.room = availability.get("room")
+    ev.room_capacity = availability.get("capacity")
+    ev.speaker = req.speaker or ev.speaker
+    ev.purpose = req.purpose or req.description or ev.purpose
+    ev.chairperson = req.chairperson or ev.chairperson or settings.chairperson
+    ev.staff_in_charge = req.staff_in_charge or ev.staff_in_charge or settings.staff_in_charge
+    ev.need_onfoot = bool(req.need_onfoot)
+    if req.fields:
+        ev.form_fields_json = _fields_to_json(req.fields)
+    ev.status = EventStatus.PENDING_APPROVAL
+    save_event(ev)
+
+    permission_letter = generate_permission_letter(
+        ev.org,
+        ev.title,
+        ev.date,
+        ev.start_time or "3:30 PM",
+        ev.end_time or "4:30 PM",
+        ev.room or "",
+        ev.speaker or "",
+        ev.purpose or "",
+        ev.chairperson or "",
+        ev.staff_in_charge or "",
+    )
+    onfoot_letter = None
+    if ev.need_onfoot:
+        onfoot_letter = generate_onfoot_letter(
+            ev.org,
+            ev.title,
+            ev.date,
+            ev.start_time or "3:30 PM",
+            ev.end_time or "4:30 PM",
+            ev.room or "",
+            ev.speaker or "",
+            ev.purpose or "",
+            ev.chairperson or "",
+            ev.staff_in_charge or "",
+        )
+
+    ev = get_event(event_id) or ev
+    ev.permission_letter = permission_letter
+    if onfoot_letter:
+        ev.onfoot_letter = onfoot_letter
+    ev.announcement_draft = _build_announcement_preview(ev)
+    save_event(ev)
+
+    response_text = (
+        f"Room reserved: {ev.room} ({ev.room_capacity or 'capacity available'}) for "
+        f"{ev.date} {ev.start_time}-{ev.end_time}.\n\n"
+        "Here is the draft email for principal - edit manually or send it from the next step."
+    )
+    return _chat_response_for_event(ev, response_text)
+
 app = FastAPI(title="CampusOps Backend", version="0.1.0")
 
 # Global exception handler
@@ -104,7 +256,7 @@ async def _reset_loop():
             from .state import reset_past_bookings
             n = reset_past_bookings(today)
             if n: logger.info(f"Daily reset: removed {n} past room_bookings before {today}")
-            # Also clean Sheet via script logic (reuse)
+            # Also clean Sheet via script logic (reuse) — new 2-sheet format: Bookings ledger
             try:
                 import os, subprocess, pathlib
                 sheet_id = os.getenv("ROOM_SHEET_ID") or os.getenv("MOCK_ROOM_SHEET_ID")
@@ -114,18 +266,40 @@ async def _reset_loop():
                     creds = get_credentials()
                     if creds:
                         svc = build("sheets","v4", credentials=creds)
-                        rows = svc.spreadsheets().values().get(spreadsheetId=sheet_id, range="Rooms!A2:H").execute().get("values",[])
+                        # Try new Bookings sheet first
+                        rows = None
+                        sheet_range_used = None
+                        clear_range = None
+                        update_range = None
+                        date_idx = 1  # Bookings: Room(0), Date(1), Start(2), End(3)
+                        try:
+                            rows = svc.spreadsheets().values().get(spreadsheetId=sheet_id, range="Bookings!A2:F").execute().get("values",[])
+                            sheet_range_used = "Bookings"
+                            clear_range = "Bookings!A2:F"
+                            update_range = "Bookings!A2"
+                        except:
+                            rows = None
+                        if rows is None:
+                            # fallback old single-sheet
+                            try:
+                                rows = svc.spreadsheets().values().get(spreadsheetId=sheet_id, range="Rooms!A2:H").execute().get("values",[])
+                                sheet_range_used = "Rooms"
+                                clear_range = "Rooms!A2:H"
+                                update_range = "Rooms!A2"
+                                date_idx = 2
+                            except:
+                                rows = []
                         kept=[]; removed=0
-                        for r in rows:
-                            if len(r)<3 or not r[2].strip():
+                        for r in rows or []:
+                            if len(r) <= date_idx or not r[date_idx].strip():
                                 kept.append(r); continue
-                            if r[2].strip() >= today:
+                            if r[date_idx].strip() >= today:
                                 kept.append(r)
                             else: removed+=1
-                        if removed:
-                            svc.spreadsheets().values().clear(spreadsheetId=sheet_id, range="Rooms!A2:H").execute()
-                            if kept: svc.spreadsheets().values().update(spreadsheetId=sheet_id, range="Rooms!A2", valueInputOption="RAW", body={"values": kept}).execute()
-                            logger.info(f"Sheet reset: removed {removed} past rows, kept {len(kept)}")
+                        if removed and clear_range:
+                            svc.spreadsheets().values().clear(spreadsheetId=sheet_id, range=clear_range).execute()
+                            if kept: svc.spreadsheets().values().update(spreadsheetId=sheet_id, range=update_range, valueInputOption="RAW", body={"values": kept}).execute()
+                            logger.info(f"Sheet reset ({sheet_range_used}): removed {removed} past rows, kept {len(kept)}")
             except Exception as se: logger.warning(f"Sheet reset warn: {se}")
         except Exception as e: logger.warning(f"Reset loop error: {e}")
         await asyncio.sleep(24*3600)  # 24h
@@ -418,7 +592,7 @@ def rooms_reset(request: Request, user=Depends(get_current_user)):
     from app.state import reset_past_bookings
     today = _d.today().isoformat()
     n = reset_past_bookings(today)
-    # also try sheet
+    # also try sheet — new 2-sheet format: Bookings ledger, RoomInventory is static
     try:
         import os
         sheet_id = os.getenv("ROOM_SHEET_ID") or os.getenv("MOCK_ROOM_SHEET_ID")
@@ -428,18 +602,37 @@ def rooms_reset(request: Request, user=Depends(get_current_user)):
             creds = get_credentials()
             if creds:
                 svc = build("sheets","v4", credentials=creds)
-                rows = svc.spreadsheets().values().get(spreadsheetId=sheet_id, range="Rooms!A2:H").execute().get("values",[])
+                rows = None
+                clear_range = None
+                update_range = None
+                date_idx = 1
+                sheet_used = "Bookings"
+                try:
+                    rows = svc.spreadsheets().values().get(spreadsheetId=sheet_id, range="Bookings!A2:F").execute().get("values",[])
+                    clear_range = "Bookings!A2:F"
+                    update_range = "Bookings!A2"
+                except:
+                    rows = None
+                if rows is None:
+                    try:
+                        rows = svc.spreadsheets().values().get(spreadsheetId=sheet_id, range="Rooms!A2:H").execute().get("values",[])
+                        clear_range = "Rooms!A2:H"
+                        update_range = "Rooms!A2"
+                        date_idx = 2
+                        sheet_used = "Rooms"
+                    except:
+                        rows = []
                 kept=[]; removed=0
-                for r in rows:
-                    if len(r)<3 or not r[2].strip():
+                for r in rows or []:
+                    if len(r) <= date_idx or not r[date_idx].strip():
                         kept.append(r); continue
-                    if r[2].strip() >= today:
+                    if r[date_idx].strip() >= today:
                         kept.append(r)
                     else: removed+=1
-                if removed:
-                    svc.spreadsheets().values().clear(spreadsheetId=sheet_id, range="Rooms!A2:H").execute()
-                    if kept: svc.spreadsheets().values().update(spreadsheetId=sheet_id, range="Rooms!A2", valueInputOption="RAW", body={"values": kept}).execute()
-                return {"db_removed": n, "sheet_removed": removed, "kept": len(kept), "today": today}
+                if removed and clear_range:
+                    svc.spreadsheets().values().clear(spreadsheetId=sheet_id, range=clear_range).execute()
+                    if kept: svc.spreadsheets().values().update(spreadsheetId=sheet_id, range=update_range, valueInputOption="RAW", body={"values": kept}).execute()
+                return {"db_removed": n, "sheet_removed": removed, "kept": len(kept), "sheet": sheet_used, "today": today}
     except Exception as e:
         return {"db_removed": n, "sheet_error": str(e), "today": today}
     return {"db_removed": n, "today": today}
@@ -489,76 +682,52 @@ def approve_event(event_id: str, body: ApproveRequest, request: Request, user=De
     if ev.status != EventStatus.PENDING_APPROVAL:
         raise HTTPException(400, f"Event not in pending_approval, current: {ev.status}")
     if body.approved:
-        ev.status = EventStatus.LIVE
-        save_event(ev)
-        # --- AUTO-RESUME: intelligently continue without manual /chat, reusing stored fields + announcement draft ---
+        # --- AUTO-RESUME: create form/announcement deterministically. Do not wait on the LLM here. ---
         try:
-            agent = get_agent()
-            from datetime import datetime
-            import json as _json
-            today_str = datetime.now().strftime("%Y-%m-%d (%A)")
-            fields_note = ""
-            if ev.form_fields_json:
-                try:
-                    _fields = _json.loads(ev.form_fields_json)
-                    fields_note = f"Use this exact fields_json for form: {ev.form_fields_json}. "
-                    # also ensure agent reuses preview announcement
-                except:
-                    pass
-            announcement_note = ""
-            if ev.announcement_draft:
-                announcement_note = f"Reuse this announcement draft (already approved by authority): {ev.announcement_draft} "
-            resume_prompt = (
-                f"[System: Today is {today_str}. Human APPROVED event {ev.id}. "
-                f"Event context: {ev.model_dump_json()} "
-                f"Resume workflow: create registration form and send announcement. "
-                f"{fields_note}{announcement_note}"
-                f"If no fields specified, use defaults. Persist with upsert_event including sheet_link.]"
+            from app.tools.forms import create_registration_form as _cf
+            import json as _js2
+
+            raw = _cf(
+                ev.title or "Event",
+                ev.date or "",
+                ev.purpose or f"Registration for {ev.title}",
+                ev.form_fields_json or "",
             )
-            result = _invoke_agent(agent, resume_prompt)
-            # normalize agent response like chat does
-            if isinstance(result, list):
-                parts = [b.get("text","") for b in result if isinstance(b, dict) and "text" in b]
-                text = "\n".join(parts) if parts else str(result)
-            elif hasattr(result, "message"):
-                msg = result.message
-                text = str(msg)
-                if isinstance(msg, list):
-                    parts = [b.get("text","") for b in msg if isinstance(b, dict) and "text" in b]
-                    text = "\n".join(parts) if parts else text
-            else:
-                text = str(result)
-            latest = get_latest_event()
-            # also fetch updated event (upsert may have updated latest)
-            updated = get_event(event_id)
-            return {"message": "Approved and auto-resumed. " + text, "event": updated or latest, "agent_response": text}
-        except Exception as e:
-            # Fallback: try deterministic form creation without agent (Gemini may be 401)
+            data = _js2.loads(raw)
+            if not data.get("form_link"):
+                raise RuntimeError(data.get("error") or "Form creation returned no form_link")
+
+            ev.form_id = data.get("form_id")
+            ev.form_link = data.get("form_link")
+            ev.sheet_id = data.get("sheet_id") or ev.sheet_id
+            ev.sheet_link = data.get("sheet_link") or data.get("responses_link") or ev.sheet_link
+            ev.status = EventStatus.LIVE
+            save_event(ev)
+
+            announcement_result = ""
             try:
-                from app.tools.forms import create_registration_form as _cf
-                import json as _js2
-                # Use stored fields or defaults
-                fields_json = ev.form_fields_json or ""
-                # Ensure org's token is used via forms tool (it will resolve via title/date)
-                raw = _cf(ev.title or "Event", ev.date or "", ev.purpose or f"Registration for {ev.title}", fields_json)
-                data = _js2.loads(raw)
-                if data.get("form_link"):
-                    ev.form_id = data.get("form_id")
-                    ev.form_link = data.get("form_link")
-                    ev.sheet_id = data.get("sheet_id") or ev.sheet_id
-                    ev.sheet_link = data.get("sheet_link") or data.get("responses_link") or ev.sheet_link
+                from app.tools.announcement import send_announcement as _sa
+                announcement_result = _sa(ev.title or "Event", ev.date or "", ev.room or "", ev.form_link or "")
+                if not announcement_result.startswith("[MOCK"):
+                    ev.announcement_sent = True
                     save_event(ev)
-                    # Try announcement via Brevo fallback (already handles Brevo)
-                    try:
-                        from app.tools.announcement import send_announcement as _sa
-                        _sa(ev.title or "Event", ev.date or "", ev.room or "", ev.form_link or "")
-                        ev.announcement_sent = True
-                        save_event(ev)
-                    except: pass
-                    return {"message": f"Approved (fallback, agent {e}). Form created deterministically: {ev.form_link}", "event": ev, "agent_response": f"Fallback due to {e}"}
-            except Exception as fe:
-                logger.warning(f"Approve fallback also failed: {fe}")
-            return {"message": f"Approved but agent resume failed: {e}. Call POST /chat with event_id to retry.", "event": ev}
+            except Exception as ae:
+                announcement_result = f"Announcement failed: {ae}"
+                logger.warning("Announcement failed after approval for event %s: %s", ev.id, ae)
+
+            msg = f"Approved. Form created: {ev.form_link}"
+            if ev.sheet_link:
+                msg += f" | Responses sheet: {ev.sheet_link}"
+            elif data.get("sheet_error"):
+                msg += f" | Response sheet creation failed: {data['sheet_error']}"
+            if announcement_result:
+                msg += f" | {announcement_result}"
+            return {"message": msg, "event": ev, "agent_response": announcement_result}
+        except Exception as e:
+            logger.exception("Approve resume failed for event %s", ev.id)
+            ev.status = EventStatus.PENDING_APPROVAL
+            save_event(ev)
+            return {"message": f"Approval recorded, but form creation failed: {e}. Event left in pending_approval so it can be retried.", "event": ev}
     else:
         ev.status = EventStatus.DRAFT
         save_event(ev)
@@ -567,11 +736,6 @@ def approve_event(event_id: str, body: ApproveRequest, request: Request, user=De
 @app.post("/chat", response_model=ChatResponse)
 @limiter.limit("20/minute")
 def chat(req: ChatRequest, request: Request, user=Depends(get_current_user)):
-    try:
-        agent = get_agent()
-    except ValueError as e:
-        raise HTTPException(500, str(e))
-
     # Inject current date for every call so relative dates resolve correctly
     from datetime import datetime
     today_str = datetime.now().strftime("%Y-%m-%d (%A)")
@@ -702,9 +866,16 @@ def chat(req: ChatRequest, request: Request, user=Depends(get_current_user)):
                 except: pass
             raise HTTPException(status_code=409, detail=data)
 
+    if not req.event_id and new_event_id and req.date and req.start_time and req.end_time:
+        return _create_event_deterministically(req, user, new_event_id)
+
     full_prompt = date_context + context + req.message
 
     try:
+        try:
+            agent = get_agent()
+        except ValueError as e:
+            raise HTTPException(500, str(e))
         result = _invoke_agent(agent, full_prompt)
         # strands may return: AgentResult, string, or list of blocks like [{'text': ...}, {'reasoningContent': ...}]
         if isinstance(result, list):
@@ -837,8 +1008,8 @@ def chat(req: ChatRequest, request: Request, user=Depends(get_current_user)):
                 # Resolve dynamic defaults from org settings
                 _s = get_org_settings(latest_for_letters.org or req.message[:30])
                 _def_org = _s.org if _s.org and _s.org != "default" else (latest_for_letters.org or "FOSS MEC")
-                _def_chair = _s.chairperson or "Arthana Sreekesh"
-                _def_staff = _s.staff_in_charge or "Aysha Fymin Majeed"
+                _def_chair = _s.chairperson or "Charles Xavier"
+                _def_staff = _s.staff_in_charge or "Joby John"
                 if need_perm:
                     generate_permission_letter(
                         latest_for_letters.org or _def_org,

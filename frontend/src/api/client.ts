@@ -1,8 +1,14 @@
 import axios from "axios";
 
+export const TIMEOUTS = {
+  SHORT: 15000,
+  CHAT: 70000,
+  PROXY: 30000,
+};
+
 export const api = axios.create({
   baseURL: "",
-  timeout: 15000,
+  timeout: TIMEOUTS.SHORT,
   withCredentials: true,
 });
 
@@ -13,7 +19,7 @@ api.interceptors.request.use((cfg) => {
       const c = JSON.parse(raw);
       if (c?.name) cfg.headers["X-Org"] = c.name;
     }
-  } catch {}
+  } catch { }
   // attach JWT if stored (fallback)
   const t = localStorage.getItem("access_token");
   if (t) cfg.headers["Authorization"] = `Bearer ${t}`;
@@ -23,7 +29,7 @@ api.interceptors.request.use((cfg) => {
 api.interceptors.response.use(
   (res) => {
     // store token if returned
-    if (res.data?.access_token) try { localStorage.setItem("access_token", res.data.access_token); } catch {}
+    if (res.data?.access_token) try { localStorage.setItem("access_token", res.data.access_token); } catch { }
     return res;
   },
   (err) => {
@@ -33,9 +39,17 @@ api.interceptors.response.use(
       const detail = err.response.data.detail;
       err.message = typeof detail === "string" ? detail : detail.error || JSON.stringify(detail);
     }
-    if (err.response?.status === 401 && !location.pathname.includes("/login")) {
-      // auto-redirect to login on auth failure (but allow sandbox)
-      // console.warn("401 -> login");
+    // 401 auto-redirect to login (but allow sandbox and landing page)
+    if (err.response?.status === 401 && !location.pathname.includes("/login") && location.pathname !== "/") {
+      localStorage.removeItem("access_token");
+      const org = localStorage.getItem("club");
+      if (org && !org.includes("TEST_CLUB")) {
+        const orgName = JSON.parse(org).name;
+        const orgSafe = orgName.replace(/[^\w]/g, "-").toLowerCase();
+        window.location.href = `/login?org=${orgSafe}&reason=expired`;
+      } else {
+        window.location.href = "/login?reason=sandbox";
+      }
     }
     // Surface structured conflict errors
     return Promise.reject(err);
@@ -95,7 +109,7 @@ export type ChatResp = { response: string; event_id: string | null; status: Even
 export type ApproveResp = { message: string; event: Event; agent_response?: string };
 export type RegistrationResp = { event_id: string; count: number; source?: string; sheet_link?: string | null; sheet_id?: string | null; mock?: boolean; sync?: unknown };
 
-export const chat = (data: ChatReq) => api.post<ChatResp>("/chat", data, { timeout: 70000 }).then(r => r.data);
+export const chat = (data: ChatReq) => api.post<ChatResp>("/chat", data, { timeout: TIMEOUTS.CHAT }).then(r => r.data);
 export const listEvents = (scope: "all" | "mine" = "all") => api.get<Event[]>(`/events?scope=${scope}`).then(r => r.data);
 export const getEvent = (id: string) => api.get<Event>(`/events/${id}`).then(r => r.data);
 export const approve = (id: string, approved: boolean) => api.post<ApproveResp>(`/events/${id}/approve`, { approved }).then(r => r.data);
@@ -114,12 +128,16 @@ export type OrgSettings = {
   staff_in_charge: string;
   updated_at?: string;
 };
-
 export const getSettings = (org: string) => api.get<OrgSettings>(`/settings/${encodeURIComponent(org)}`).then(r => r.data);
 export const listSettings = () => api.get<OrgSettings[]>(`/settings`).then(r => r.data);
 export const saveSettings = (org: string, data: OrgSettings) => api.put<OrgSettings>(`/settings/${encodeURIComponent(org)}`, data).then(r => r.data);
 
 export type GoogleStatus = { org: string; connected: boolean; configured: boolean; missing_fields: string[]; token_file: string };
 export const getGoogleStatus = (org: string) => api.get<GoogleStatus>(`/auth/google/status?org=${encodeURIComponent(org)}`).then(r => r.data);
-export const getGoogleUrl = (org: string) => api.get<{url:string|null; connected?:boolean; error?:string; fallback?:string}>(`/auth/google/url?org=${encodeURIComponent(org)}`).then(r => r.data);
+export const getGoogleUrl = (org: string) => api.get<{ url: string | null; connected?: boolean; error?: string; fallback?: string }>(`/auth/google/url?org=${encodeURIComponent(org)}`).then(r => r.data);
 export const disconnectGoogle = (org: string) => api.post(`/auth/google/disconnect?org=${encodeURIComponent(org)}`).then(r => r.data);
+
+// Helper: relative poster URL that works with Vite proxy
+export function posterUrl(id: string, variant: "square" | "story" = "square"): string {
+  return `/events/${id}/poster?variant=${variant}`;
+}

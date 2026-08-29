@@ -7,18 +7,8 @@ import { useNavigate } from "react-router-dom";
 import { Loader2 } from "lucide-react";
 import { useAuth } from "../stores/auth";
 import { useQueryClient } from "@tanstack/react-query";
-import { FormFieldBuilder, type FieldConfig } from "../components/FormFieldBuilder";
+import { FormFieldBuilder, type FieldConfig, getDefaultFields } from "../components/FormFieldBuilder";
 
-function getDefaultFields(): FieldConfig[] {
-  return [
-    { id: crypto.randomUUID(), title: "Full Name", type: "text", required: true },
-    { id: crypto.randomUUID(), title: "Email", type: "text", required: true },
-    { id: crypto.randomUUID(), title: "Year", type: "multiple_choice", required: true, options: ["1st", "2nd", "3rd", "4th"] },
-    { id: crypto.randomUUID(), title: "Expectations", type: "paragraph", required: false },
-  ];
-}
-
-// Strip internal `id` before sending to backend (not part of ChatReq fields type)
 function fieldsForBackend(fields: FieldConfig[]) {
   return fields.map(({ id, ...rest }) => rest);
 }
@@ -51,6 +41,9 @@ export default function NewEvent() {
   const [missingFields, setMissingFields] = useState<string[]>([]);
   const [driveConnected, setDriveConnected] = useState<boolean | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const chatStartTime = useRef<number | null>(null);
+  const [staleDraft, setStaleDraft] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
 
   // Load org settings to prefill chairperson/staff — only if not placeholder
   useEffect(()=>{
@@ -76,17 +69,17 @@ export default function NewEvent() {
     setSpeaker("Mr. Deepak Padmanabhan (Alumni of MEC)");
     setPurpose("Students will gain insights from his academic and professional journey");
     setNeedOnfoot(true);
-    setResp(null); setEditEmail(""); setShowConfirm(false); setError(null); setSuccess(null);
+    setResp(null); setEditEmail(""); setShowConfirm(false); setError(null); setSuccess(null); setStaleDraft(false);
   };
   const doChat = async()=>{
     if(loadingChat) return;
     if(settingsReady===false){ setError(`Settings incomplete — please complete Settings first. Missing: ${missingFields.join(", ")}. Go to Settings → fill all fields.`); return; }
-    if(driveConnected===false){ setError(`Google Drive not connected for ${club?.name}. Go to Settings → Connect Google Drive and approve permissions, then retry.`); return; }
+    // Drive not connected is warning only — backend allows mock
     if(!message.trim()){ setError("Please enter a natural language request."); return; }
     if(message.trim().length < 10){ setError("Request too short — add more detail (e.g. org, topic, headcount)."); return; }
     if(!date){ setError("Please pick a date — date picker is required to prevent double-bookings."); return; }
     if(!start.trim() || !end.trim()){ setError("Start and end time are required."); return; }
-    setLoadingChat(true); setError(null); setSuccess(null);
+    setLoadingChat(true); setError(null); setSuccess(null); setStaleDraft(false); chatStartTime.current = Date.now(); setElapsed(0);
     try{
       const payload: ChatReq = { message: message.trim(), date, fields: fieldsForBackend(fields), start_time: start.trim() || undefined, end_time: end.trim() || undefined, speaker: speaker.trim() || undefined, purpose: purpose.trim() || undefined, need_onfoot: needOnfoot, chairperson: chairperson.trim() || undefined, staff_in_charge: staffInCharge.trim() || undefined };
       const r = await chat(payload);
@@ -95,7 +88,7 @@ export default function NewEvent() {
       if(!r.permission_letter && !r.email_draft) setError("Agent returned no letter — try editing and sending anyway or reset.");
       else setSuccess("Draft ready — review and send to principal.");
       await qc.invalidateQueries({queryKey:["events"]});
-    }catch(e: any){ const d = e?.response?.data?.detail; let msg: string; if (typeof d === "object" && d?.error) { msg = d.error + (d.conflicts?.length ? ` Conflicts: ${JSON.stringify(d.conflicts.slice(0,2))}` : "") + (d.alternatives?.length ? ` Try: ${d.alternatives.map((a:any)=>a.room).join(", ")}` : "") + (d.suggestion ? ` — ${d.suggestion}` : ""); } else { msg = (typeof d === "string" ? d : e?.message) || "Failed"; } setError(msg); }
+    }catch(e: any){ const d = e?.response?.data?.detail; let msg: string; if (typeof d === "object" && d?.error) { msg = d.error + (d.conflicts?.length ? ` Conflicts: ${JSON.stringify(d.conflicts.slice(0,2))}` : "") + (d.alternatives?.length ? ` Try: ${d.alternatives.map((a:any)=>a.room).join(", ")}` : "") + (d.suggestion ? ` — ${d.suggestion}` : "") + (d.reason ? ` — ${d.reason}` : "") ; } else { msg = (typeof d === "string" ? d : e?.message) || "Failed"; } setError(msg); }
     setLoadingChat(false);
   };
   const doSend = async()=>{
@@ -123,6 +116,38 @@ export default function NewEvent() {
     setLoadingApprove(false);
   };
 
+  // Mark draft stale when any input changes after getting a response
+  useEffect(()=>{
+    if (resp && !staleDraft) {
+      setStaleDraft(true);
+      setSuccess(null);
+    }
+  }, [message, date, start, end, speaker, purpose, chairperson, staffInCharge, needOnfoot]);
+  useEffect(()=>{
+    if (resp && !staleDraft) {
+      setStaleDraft(true);
+      setSuccess(null);
+    }
+  }, [fields]);
+
+  // elapsed timer tick while loadingChat
+  useEffect(()=>{
+    if (!loadingChat) return;
+    const id = setInterval(()=> {
+      if (chatStartTime.current) setElapsed(Math.floor((Date.now() - chatStartTime.current)/1000));
+    }, 1000);
+    return ()=> clearInterval(id);
+  }, [loadingChat]);
+
+  // Clear error on focus for any input
+  useEffect(()=>{
+    const clear = () => setError(null);
+    const els = document.querySelectorAll('textarea, input');
+    els.forEach(el => el.addEventListener("focus", clear));
+    return () => els.forEach(el => el.removeEventListener("focus", clear));
+  }, [resp, error]);
+
+  // ESC to close confirm dialog
   useEffect(()=>{
     if(!showConfirm) return;
     const onKey = (e: KeyboardEvent)=>{ if(e.key==="Escape") setShowConfirm(false); };
@@ -160,7 +185,7 @@ export default function NewEvent() {
         <div className="space-y-4">
           <Card>
             <label htmlFor="nl-message" className="text-sm text-zinc-300">Natural language request</label>
-            <textarea id="nl-message" aria-label="Natural language request" value={message} onChange={e=>{setMessage(e.target.value); if(error) setError(null);}} rows={3} className="w-full mt-2 rounded-xl bg-white/5 border border-white/10 p-3 text-white placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-oxide" placeholder="e.g. FOSS MEC wants java workshop for 50 next Monday" />
+            <textarea id="nl-message" aria-label="Natural language request" value={message} onChange={e=>{setMessage(e.target.value); if(error) setError(null);}} rows={3} className="w-full mt-2 rounded-xl bg-white/5 border border-white/10 p-3 text-white placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-oxide focus:ring-offset-2" placeholder="e.g. FOSS MEC wants java workshop for 50 next Monday" />
             <div className="text-xs text-zinc-500 mt-1">{message.trim().length} chars</div>
           </Card>
           <Card>
@@ -211,13 +236,18 @@ export default function NewEvent() {
           </Card>
           {error && <div role="alert" className="rounded-xl border border-red-900/30 bg-red-950/20 p-3 text-sm text-red-300">{error}</div>}
           {success && <div role="status" className="rounded-xl border border-sage/20 bg-sage/10 p-3 text-sm text-sage">{success}</div>}
-          <Button onClick={doChat} disabled={loadingChat || !message.trim() || settingsReady===false || driveConnected===false} className="w-full" title={settingsReady===false ? "Complete Settings first" : driveConnected===false ? "Connect Drive first" : undefined}>{loadingChat ? <><Loader2 className="mr-2 h-4 w-4 animate-spin"/>Thinking...</> : settingsReady===false ? "Blocked — Complete Settings First" : driveConnected===false ? "Blocked — Connect Drive First" : "Create → Show Draft Letter"}</Button>
+          {staleDraft && <div role="alert" className="rounded-xl border border-orange-500/30 bg-orange-500/10 p-3 text-sm text-orange-300 mt-2">⚠️ Draft is stale — re-create to update changes.</div>}
+          <Button onClick={doChat} disabled={loadingChat || !message.trim() || settingsReady===false} className="w-full" title={settingsReady===false ? "Complete Settings first" : undefined}>
+            {loadingChat ? (
+              <><Loader2 className="mr-2 h-4 w-4 animate-spin"/>Thinking… {elapsed}s</>
+            ) : settingsReady===false ? "Blocked — Complete Settings First" : "Create → Show Draft Letter"}
+          </Button>
           {settingsReady===false && <p className="text-xs text-amber-300 text-center">Go to <button onClick={()=>nav("/settings")} className="underline">Settings</button> to unlock.</p>}
-          {driveConnected===false && settingsReady && <p className="text-xs text-amber-300 text-center">Drive not connected — <button onClick={()=>nav("/settings")} className="underline">Connect in Settings</button> to create real Forms/Sheets.</p>}
+          {driveConnected===false && settingsReady && <p className="text-xs text-zinc-500 text-center">⚠️ Drive not connected — Forms/Sheets will be mock. <button onClick={()=>nav("/settings")} className="underline text-oxide">Connect in Settings</button> for real Drive.</p>}
         </div>
 
         <div className="space-y-4">
-          {!resp ? <Card><p className="text-sm text-zinc-500">Draft preview will appear here after Create. You can edit the permission letter then Send to Principal (PDFs attached).</p></Card> : (
+          {!resp ? <Card><p className="text-sm text-zinc-500">Draft preview will appear after Create. You can edit the permission letter then Send to Principal (PDFs attached).</p></Card> : (
             <>
               <Card>
                 <h3 className="font-medium text-white">Agent response</h3>
@@ -231,7 +261,7 @@ export default function NewEvent() {
                   {resp.permission_email_sent ? <div role="status" className="flex-1 rounded-xl border border-sage/30 bg-sage/10 px-4 py-2 text-center text-sm text-sage">Sent to principal</div> : <Button onClick={()=>setShowConfirm(true)} disabled={loadingSend || loadingApprove || !editEmail.trim()} className="flex-1">Send to Principal (with PDFs)</Button>}
                   {isAdmin && <Button variant="outline" onClick={doApprove} disabled={loadingApprove || loadingSend}>{loadingApprove ? <><Loader2 className="mr-2 h-4 w-4 animate-spin"/>Approving...</> : "Approve (Admin)"}</Button>}
                 </div>
-                {!isAdmin && <p className="text-xs text-zinc-500 mt-2">After sending, principal approves via Admin dashboard — you’ll be notified when live.</p>}
+                {!isAdmin && <p className="text-xs text-zinc-500 mt-2">After sending, principal approves via Admin dashboard — you'll be notified when live.</p>}
                 {resp.event_id && <Button variant="ghost" onClick={resetForm} className="w-full mt-2 text-xs">Start Fresh — New Event</Button>}
                 <p className="text-xs text-zinc-500 mt-2">Send attaches Permission PDF + On-foot PDF (if needed). Shows confirmation first.</p>
               </Card>

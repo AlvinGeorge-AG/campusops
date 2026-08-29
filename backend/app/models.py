@@ -49,8 +49,8 @@ class Event(BaseModel):
     room_capacity: Optional[int] = None
     speaker: Optional[str] = None  # e.g. Mr. Deepak Padmanabhan (Alumni)
     purpose: Optional[str] = None  # detailed purpose for letter
-    chairperson: Optional[str] = None  # e.g. Arthana Sreekesh
-    staff_in_charge: Optional[str] = None  # e.g. Aysha Fymin Majeed
+    chairperson: Optional[str] = None  
+    staff_in_charge: Optional[str] = None  
     need_onfoot: bool = False  # whether on-foot publicity letter needed
     status: EventStatus = EventStatus.DRAFT
     form_id: Optional[str] = None
