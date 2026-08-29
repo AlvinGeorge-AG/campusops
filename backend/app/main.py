@@ -35,8 +35,8 @@ class AgentBusyError(RuntimeError):
     pass
 
 def _invoke_agent(agent, prompt):
-    if not _agent_invocation_lock.acquire(blocking=False):
-        raise AgentBusyError("Another agent request is still processing. Please wait for it to finish.")
+    if not _agent_invocation_lock.acquire(timeout=60):
+        raise AgentBusyError("Another agent request is still processing. Please try again in a moment.")
     try:
         return agent(prompt)
     finally:

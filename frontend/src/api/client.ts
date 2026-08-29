@@ -28,16 +28,16 @@ api.interceptors.response.use(
   },
   (err) => {
     if (!err.response && err.code === "ECONNABORTED") {
-      err.message = "Request timed out — backend may be down";
+      err.message = "Request timed out — the agent is still processing. Please wait and retry.";
+    } else if (err.response?.data?.detail) {
+      const detail = err.response.data.detail;
+      err.message = typeof detail === "string" ? detail : detail.error || JSON.stringify(detail);
     }
     if (err.response?.status === 401 && !location.pathname.includes("/login")) {
       // auto-redirect to login on auth failure (but allow sandbox)
       // console.warn("401 -> login");
     }
     // Surface structured conflict errors
-    if (err.response?.status === 409 && err.response?.data?.reason) {
-      err.message = err.response.data.reason + (err.response.data.alternatives ? " Alternatives: " + JSON.stringify(err.response.data.alternatives) : "");
-    }
     return Promise.reject(err);
   }
 );
