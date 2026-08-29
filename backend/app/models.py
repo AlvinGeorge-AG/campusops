@@ -39,6 +39,9 @@ class Event(BaseModel):
     registrant_count: int = 0
     announcement_sent: bool = False
     reminder_sent: bool = False
+    permission_email_sent: bool = False
+    permission_email_message_id: Optional[str] = None
+    permission_email_sent_at: Optional[str] = None
     created_at: str = ""
 
     def ensure_id(self):
