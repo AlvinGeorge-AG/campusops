@@ -51,6 +51,3 @@ def permission_letter_pdf(letter_text: str) -> bytes:
 
 def onfoot_letter_pdf(letter_text: str) -> bytes:
     return _build_pdf(letter_text, title="")
-
-def announcement_pdf(announcement_text: str) -> bytes:
-    return _build_pdf(announcement_text, title="Event Announcement")

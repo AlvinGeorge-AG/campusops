@@ -136,31 +136,3 @@ def generate_onfoot_letter(organization: str, event_title: str, date: str, start
     except:
         pass
     return onfoot
-
-@tool
-def generate_announcement_preview(organization: str, event_title: str, date: str, room: str, expected_headcount: int, description: str = "") -> str:
-    """Generate announcement preview for students. Returns announcement text."""
-    desc = description or f"Join us for {event_title} - an exciting session organized by {organization}."
-    ann = f"""Hello,
-
-We are excited to announce: {event_title} by {organization}
-
-Date: {date}
-Venue: {room}
-Expected: {expected_headcount} students
-
-{desc}
-
-Registration will open after approval - form link to be attached.
-
-Seats are limited. Please register soon.
-- CampusOps"""
-    try:
-        from ..state import get_latest_event, save_event
-        ev = get_latest_event()
-        if ev:
-            ev.announcement_draft = ann
-            save_event(ev)
-    except:
-        pass
-    return ann

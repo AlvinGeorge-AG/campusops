@@ -831,13 +831,9 @@ def chat(req: ChatRequest, request: Request, user=Depends(get_current_user)):
         if _title_fixed and latest_for_letters.permission_letter and _old_title and _old_title in latest_for_letters.permission_letter:
             need_perm = True
         need_onfoot = bool(latest_for_letters.need_onfoot) and not latest_for_letters.onfoot_letter
-        need_ann = not latest_for_letters.announcement_draft
-        # Also regenerate announcement if title fixed and it contains old title
-        if _title_fixed and latest_for_letters.announcement_draft and _old_title and _old_title in latest_for_letters.announcement_draft:
-            need_ann = True
-        if need_perm or need_onfoot or need_ann:
+        if need_perm or need_onfoot:
             try:
-                from app.tools.letters import generate_permission_letter, generate_onfoot_letter, generate_announcement_preview
+                from app.tools.letters import generate_permission_letter, generate_onfoot_letter
                 # Resolve dynamic defaults from org settings
                 _s = get_org_settings(latest_for_letters.org or req.message[:30])
                 _def_org = _s.org if _s.org and _s.org != "default" else (latest_for_letters.org or "FOSS MEC")
@@ -868,15 +864,6 @@ def chat(req: ChatRequest, request: Request, user=Depends(get_current_user)):
                         latest_for_letters.purpose or req.purpose or req.description or "",
                         latest_for_letters.chairperson or req.chairperson or _def_chair,
                         latest_for_letters.staff_in_charge or req.staff_in_charge or _def_staff
-                    )
-                if need_ann:
-                    generate_announcement_preview(
-                        latest_for_letters.org or _def_org,
-                        latest_for_letters.title or "Workshop",
-                        latest_for_letters.date or "2026-08-31",
-                        latest_for_letters.room or "SDPK",
-                        latest_for_letters.expected_headcount or 50,
-                        latest_for_letters.purpose or req.purpose or req.description or ""
                     )
             except Exception as le:
                 logger.warning("letter fallback failed: %s", le)
@@ -1065,21 +1052,9 @@ def get_registrations(event_id: str, request: Request, user=Depends(get_current_
         pass
     return {"event_id": event_id, "form_id": ev.form_id, "form_link": ev.form_link, "sheet_id": ev.sheet_id, "sheet_link": ev.sheet_link, "count": data.get("registrant_count", 0), "source": data.get("source"), "sync": sync_res, "raw": data}
 
-@app.get("/events/{event_id}/poster")
-def get_poster(event_id: str, variant: str = "square", request: Request = None, user=Depends(get_current_user)):
-    import re, pathlib
-    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
-        raise HTTPException(404, "Not found")
-    from app.tools.poster import poster_bytes_for_event
-    try:
-        data = poster_bytes_for_event(event_id, variant)
-    except Exception as e:
-        raise HTTPException(404, str(e))
-    from fastapi.responses import Response
-    return Response(content=data, media_type="image/png", headers={"Content-Disposition": f'inline; filename="{event_id}_{variant}.png"'})
-
 @app.post("/events/{event_id}/poster")
 def create_poster(event_id: str, variant: str = "square", request: Request = None, user=Depends(get_current_user)):
+    raise HTTPException(410, "Poster generation has been removed")
     import re, json, pathlib
     if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
         raise HTTPException(404, "Not found")

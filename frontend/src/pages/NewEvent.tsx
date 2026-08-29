@@ -252,7 +252,6 @@ export default function NewEvent() {
                   </Card>
                 </div>
               )}
-              {resp.announcement_draft && <Card><h3 className="text-sm font-medium text-white">Announcement preview</h3><pre className="whitespace-pre-wrap text-xs text-zinc-400 mt-2">{resp.announcement_draft}</pre></Card>}
             </>
           )}
         </div>

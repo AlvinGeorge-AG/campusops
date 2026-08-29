@@ -8,7 +8,6 @@ token.json
 token_*.json
 events.db
 *.log
-data/posters/
 data/*.db
 .env
 .env.local
