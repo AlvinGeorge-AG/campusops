@@ -16,7 +16,7 @@ CampusOps is an **AI event operations agent** built with the **Strands Agents SD
 
 ## ✨ Demo
 
-- **Video (5 min max):** `campusops_final_bob.mp4` in repo root — upload to YouTube/Vimeo and replace link here: `https://youtu.be/YOUR_VIDEO_ID`
+- **Video (5 min max):** `https://youtu.be/LRXyYXjvQ48`
 - **Live demo:** *Not yet deployed — runs locally. Planned: Bedrock AgentCore + Vercel/Render.*
 - **Slides / Story:** See [`CampsOps-System-Design.md`](CampsOps-System-Design.md)
 
