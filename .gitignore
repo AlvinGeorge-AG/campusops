@@ -1,5 +1,8 @@
 frontend
-
+.vscode
 .kilo
+.venv*
 
-palette-preview.html
+token.json
+
+credentials.json

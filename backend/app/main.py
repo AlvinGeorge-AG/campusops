@@ -15,6 +15,7 @@ from .config import (
     DEFAULT_CHAIRPERSON, DEFAULT_STAFF, INSTITUTION_NAME, INSTITUTION_PLACE,
     FRONTEND_ORIGIN, SANDBOX_ORG
 )
+from .config import DB_PATH  # ensure DB_PATH loaded
 from .state import get_org_settings, save_org_settings, list_org_settings
 from .models import OrgSettings, FieldModel
 from .auth import get_current_user, require_role, create_token, verify_password, hash_password
@@ -154,22 +155,12 @@ def _create_event_deterministically(req: "ChatRequest", user: dict, event_id: st
         availability = {"available": True, "room": "SDPK", "capacity": 60, "source": "mock_fallback"}
     if availability.get("available") is False or not availability.get("room"):
         try:
-            from app.state import get_conn as _gc2
-            from app.config import DATABASE_URL as _DBURL2
-            if _DBURL2 and _DBURL2.strip():
-                conn = _gc2()
-                try:
-                    conn.execute("DELETE FROM events WHERE id=%s", (event_id,))
-                    conn.commit()
-                finally:
-                    conn.close()
-            else:
-                import sqlite3
-                from app.config import DB_PATH
-                conn = sqlite3.connect(DB_PATH)
-                conn.execute("DELETE FROM events WHERE id=?", (event_id,))
-                conn.commit()
-                conn.close()
+            import sqlite3
+            from app.config import DB_PATH
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("DELETE FROM events WHERE id=?", (event_id,))
+            conn.commit()
+            conn.close()
         except Exception:
             pass
         raise HTTPException(status_code=409, detail=availability)
@@ -319,26 +310,64 @@ async def _reset_loop():
         except Exception as e: logger.warning(f"Reset loop error: {e}")
         await asyncio.sleep(24*3600)  # 24h
 
-# --- Deprecated poller removed: on-demand + cache (60s TTL) now handles registrations ---
 _poller_task = None
+
+async def _polling_loop():
+    """Poll Google Forms/Sheets for LIVE events every POLL_INTERVAL seconds and update registrant_count + sheet sync."""
+    await asyncio.sleep(15)  # warmup
+    while True:
+        try:
+            if not MOCK_MODE and POLLER_ENABLED:
+                from .state import list_events as _le
+                from .models import EventStatus as _ES
+                live_events = [e for e in _le(include_drafts=True) if e.status == _ES.LIVE and e.form_id and not e.form_id.startswith("mock_") and not e.form_id.startswith("native_")]
+                for ev in live_events:
+                    try:
+                        from app.tools.registrations import get_registration_count, sync_responses_to_sheet
+                        # sync sheet first
+                        if ev.sheet_id and not ev.sheet_id.startswith("mock_") and not ev.sheet_id.startswith("sheet_"):
+                            try:
+                                sync_responses_to_sheet(ev.form_id, ev.sheet_id)
+                            except Exception as se:
+                                logger.debug("Poller sync failed for %s: %s", ev.id, se)
+                        import json as _js
+                        raw = get_registration_count(ev.sheet_id or "", ev.form_id or "")
+                        data = _js.loads(raw)
+                        cnt = int(data.get("registrant_count", 0) or 0)
+                        if cnt != ev.registrant_count:
+                            ev.registrant_count = cnt
+                            save_event(ev)
+                            logger.info("Poller updated %s (%s): count=%d source=%s", ev.id, ev.title, cnt, data.get("source"))
+                    except Exception as pe:
+                        logger.debug("Poller per-event error %s: %s", ev.id, pe)
+        except Exception as e:
+            logger.warning("Polling loop error: %s", e)
+        # interval: env POLL_INTERVAL or 60s default
+        interval = int(os.getenv("POLL_INTERVAL_SECONDS", "60"))
+        await asyncio.sleep(max(30, interval))
 
 @app.on_event("startup")
 async def start_poller():
-    global _reset_task
+    global _reset_task, _poller_task
     try:
         from .state import clean_unsent_drafts
         clean_unsent_drafts()
     except Exception as e:
         logger.warning(f"Startup clean drafts: {e}")
-    # Poller disabled: use on-demand GET /events/{id}/registrations with 60s cache
     _reset_task = asyncio.create_task(_reset_loop())
-    logger.info("Daily reset task enabled (24h, keeps future) - poller disabled (on-demand)")
+    if POLLER_ENABLED:
+        _poller_task = asyncio.create_task(_polling_loop())
+        logger.info("Daily reset task enabled + Google polling enabled (interval %ss)", os.getenv("POLL_INTERVAL_SECONDS", "60"))
+    else:
+        logger.info("Daily reset task enabled (24h) - polling disabled (set POLLER_ENABLED=true to enable)")
 
 @app.on_event("shutdown")
 async def stop_poller():
-    global _reset_task
+    global _reset_task, _poller_task
     if _reset_task:
         _reset_task.cancel()
+    if _poller_task:
+        _poller_task.cancel()
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
 app.state.limiter = limiter
@@ -698,52 +727,22 @@ def approve_event(event_id: str, body: ApproveRequest, request: Request, user=De
     ev = get_event(event_id)
     if not ev:
         raise HTTPException(404, "Event not found")
-    # RBAC: only admin can approve
     if user["role"] != "admin":
         raise HTTPException(403, "Only admin can approve")
     if ev.status != EventStatus.PENDING_APPROVAL:
         raise HTTPException(400, f"Event not in pending_approval, current: {ev.status}")
     if body.approved:
-        # --- AUTO-RESUME: native DB form (Neon) or Google Form fallback ---
+        # Google Forms + Sheets (real) — no native fallback
         try:
-            from .config import USE_NATIVE_FORMS, DATABASE_URL
-            use_native = USE_NATIVE_FORMS
-            # If Neon is configured and native forms enabled, use DB form (no Google API)
-            if use_native:
-                from .config import FRONTEND_ORIGIN
-                base = FRONTEND_ORIGIN.rstrip("/") if FRONTEND_ORIGIN and FRONTEND_ORIGIN != "*" else str(request.base_url).rstrip("/")
-                # If FRONTEND_ORIGIN is localhost in prod, prefer request origin for absolute link
-                if "localhost" in base and request.headers.get("origin"):
-                    base = request.headers.get("origin").rstrip("/")
-                abs_form = f"{base}/r/{ev.id}"
-                abs_resp = f"{base}/events/{ev.id}/responses"
-                ev.form_id = f"native_{ev.id}"
-                ev.form_link = abs_form
-                ev.sheet_link = abs_resp
-                ev.sheet_id = f"native_sheet_{ev.id}"
-                ev.status = EventStatus.LIVE
-                save_event(ev)
-                announcement_result = ""
-                try:
-                    from app.tools.announcement import send_announcement as _sa
-                    announcement_result = _sa(ev.title or "Event", ev.date or "", ev.room or "", abs_form)
-                    if not announcement_result.startswith("[MOCK"):
-                        ev.announcement_sent = True
-                        save_event(ev)
-                except Exception as ae:
-                    announcement_result = f"Announcement failed: {ae}"
-                    logger.warning("Announcement failed after approval for event %s: %s", ev.id, ae)
-                msg = f"Approved. Native form: {ev.form_link} | Responses: {ev.sheet_link}"
-                if announcement_result:
-                    msg += f" | {announcement_result}"
-                return {"message": msg, "event": ev, "agent_response": announcement_result}
-            # Google Forms fallback
             from app.tools.forms import create_registration_form as _cf
             import json as _js2
+            # Ensure Google is connected (warn if mock)
+            if MOCK_MODE:
+                logger.warning("Approving event %s while MOCK_MODE=true — will produce mock form", ev.id)
             raw = _cf(ev.title or "Event", ev.date or "", ev.purpose or f"Registration for {ev.title}", ev.form_fields_json or "")
             data = _js2.loads(raw)
             if not data.get("form_link"):
-                raise RuntimeError(data.get("error") or "Form creation returned no form_link")
+                raise RuntimeError(data.get("error") or "Form creation returned no form_link — check Google credentials / ROOM_SHEET_ID / token.json")
             ev.form_id = data.get("form_id")
             ev.form_link = data.get("form_link")
             ev.sheet_id = data.get("sheet_id") or ev.sheet_id
@@ -791,9 +790,9 @@ def chat(req: ChatRequest, request: Request, user=Depends(get_current_user)):
     ready, missing = is_org_configured(user["org"])
     if not ready:
         raise HTTPException(status_code=400, detail={"error": f"Please complete Settings for {user['org']} before creating events", "missing_fields": missing, "action": "Go to Settings → fill institution, principal email, chairperson, staff, announcement recipients", "org": user["org"]})
-    # Drive check: if CENTRAL_DRIVE or USE_NATIVE_FORMS or MOCK_MODE, allow event creation
-    from .config import CENTRAL_DRIVE, USE_NATIVE_FORMS, MOCK_MODE
-    if not is_google_connected(user["org"]) and not (CENTRAL_DRIVE or USE_NATIVE_FORMS or MOCK_MODE):
+    # Drive check: allow if CENTRAL_DRIVE or MOCK_MODE, else require Google Drive
+    from .config import CENTRAL_DRIVE, MOCK_MODE
+    if not is_google_connected(user["org"]) and not (CENTRAL_DRIVE or MOCK_MODE):
         raise HTTPException(status_code=400, detail={"error": f"Google Drive not connected for {user['org']}", "reason": "drive_not_connected", "action": "Go to Settings → Connect Google Drive and approve drive.file/forms.body/spreadsheets permissions", "org": user["org"], "connect_url": f"/auth/google/url?org={user['org']}"})
 
     # 1-chat heart: persist all extra metadata upfront (time/speaker/purpose/onfoot etc)
@@ -913,23 +912,11 @@ def chat(req: ChatRequest, request: Request, user=Depends(get_current_user)):
         else:
             data = _js.loads(raw)
         if data.get("available") is False:
-            # Cleanup the placeholder we created (since we block) - handle both SQLite and Neon
             if new_event_id:
                 try:
-                    from app.state import get_conn as _gc
-                    from app.config import DATABASE_URL
-                    if DATABASE_URL and DATABASE_URL.strip():
-                        # Neon - use state connection
-                        conn = _gc()
-                        try:
-                            conn.execute("DELETE FROM events WHERE id=%s", (new_event_id,))
-                            conn.commit()
-                        finally:
-                            conn.close()
-                    else:
-                        import sqlite3
-                        from app.config import DB_PATH
-                        conn = sqlite3.connect(DB_PATH); conn.execute("DELETE FROM events WHERE id=?", (new_event_id,)); conn.commit(); conn.close()
+                    import sqlite3
+                    from app.config import DB_PATH
+                    conn = sqlite3.connect(DB_PATH); conn.execute("DELETE FROM events WHERE id=?", (new_event_id,)); conn.commit(); conn.close()
                 except Exception as ce:
                     logger.warning(f"Cleanup failed for {new_event_id}: {ce}")
             raise HTTPException(status_code=409, detail=data)
@@ -1232,7 +1219,7 @@ This email was generated via CampusOps. For queries, contact {_c} ({_st}) from {
     subject = f"Request for permission to host \"{ev.title}\" - {ev.org}"
 
     mock_mode = MOCK_MODE
-    if mock_mode or (user.get("org") or "").strip().lower() == "test_club":
+    if mock_mode:
         from datetime import datetime, timezone
         ev.email_draft = full_body
         ev.permission_email_sent = True
@@ -1274,22 +1261,13 @@ This email was generated via CampusOps. For queries, contact {_c} ({_st}) from {
 
 @app.get("/events/{event_id}/registrations")
 def get_registrations(event_id: str, request: Request, user=Depends(get_current_user)):
-    """On-demand count with 60s cache. Native DB -> COUNT(*) from event_responses, Google -> Forms API."""
+    """Live count via Google Forms/Sheets (polling + on-demand sync)."""
     import re, json, time
-    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
+    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
         raise HTTPException(404, "Not found")
     ev = get_event(event_id)
     if not ev:
         raise HTTPException(404, "Event not found")
-    # Native DB path - on-demand count from Neon/SQLite event_responses
-    if ev.form_id and ev.form_id.startswith("native_"):
-        from .state import count_responses
-        cnt = count_responses(ev.id)
-        # update cached count if changed
-        if cnt != ev.registrant_count:
-            ev.registrant_count = cnt
-            save_event(ev)
-        return {"event_id": event_id, "form_id": ev.form_id, "form_link": ev.form_link, "sheet_id": ev.sheet_id, "sheet_link": ev.sheet_link, "count": cnt, "source": "native_db", "native": True}
     if not ev.form_id or ev.form_id.startswith("mock_"):
         return {"event_id": event_id, "form_id": ev.form_id, "sheet_id": ev.sheet_id, "sheet_link": ev.sheet_link, "count": ev.registrant_count or 0, "mock": True, "note": "Mock form - no live registrations"}
     from app.tools.registrations import get_registration_count, sync_responses_to_sheet
@@ -1414,136 +1392,7 @@ def upsert_settings(org: str, body: OrgSettings, request: Request, user=Depends(
                 raise HTTPException(400, f"Invalid announcement recipient email: {part}")
     return save_org_settings(body)
 
-# --- Native DB Responses (replaces Sheets) ---
-@app.get("/r/{event_id}")
-def get_public_form(event_id: str):
-    """Public: fetch event form metadata for native submission. No auth required."""
-    import re
-    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
-        raise HTTPException(404, "Not found")
-    ev = get_event(event_id)
-    if not ev:
-        raise HTTPException(404, "Event not found")
-    if ev.status not in [EventStatus.LIVE, EventStatus.CLOSED]:
-        raise HTTPException(400, f"Event not live (status: {ev.status}) - registration not open")
-    import json
-    fields = []
-    if ev.form_fields_json:
-        try:
-            fields = json.loads(ev.form_fields_json)
-            if isinstance(fields, str):
-                fields = json.loads(fields)
-        except: fields = []
-    if not fields:
-        fields = [{"title":"Full Name","type":"text","required":True},{"title":"Email","type":"text","required":True}]
-    return {"event_id": ev.id, "title": ev.title, "org": ev.org, "date": ev.date, "room": ev.room, "start_time": ev.start_time, "end_time": ev.end_time, "purpose": ev.purpose, "speaker": ev.speaker, "expected_headcount": ev.expected_headcount, "fields": fields, "status": ev.status}
-
-@app.post("/r/{event_id}/submit")
-@limiter.limit("30/minute")
-def submit_response(event_id: str, request: Request):
-    """Public form submission -> stored in Neon/SQLite event_responses."""
-    import re, json, hashlib
-    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
-        raise HTTPException(404, "Not found")
-    ev = get_event(event_id)
-    if not ev:
-        raise HTTPException(404, "Event not found")
-    if ev.status not in [EventStatus.LIVE, EventStatus.CLOSED]:
-        raise HTTPException(400, f"Registration not open (status: {ev.status})")
-    # Check capacity
-    from .state import count_responses, add_response
-    cnt = count_responses(ev.id)
-    if ev.expected_headcount and cnt >= ev.expected_headcount * 1.2:  # allow 20% overfill
-        raise HTTPException(409, "Registration full")
-    # Parse body as dict of field_title -> value (frontend sends { responses: {title: value} })
-    import asyncio
-    # FastAPI will parse JSON automatically if we use dict
-    # Use raw body
-    try:
-        body = _json_global.loads(request._body.decode() if hasattr(request,'_body') else "{}") if False else None
-    except: body=None
-    # Fallback: try sync read via starlette
-    # Simpler: use request.json via dependency - we handle via pydantic below by reading body bytes
-    return {"error":"Use /r/{event_id}/submit-json endpoint"}  # placeholder
-
-@app.post("/r/{event_id}/submit-json")
-@limiter.limit("30/minute")
-def submit_response_json(event_id: str, payload: dict, request: Request):
-    """Public JSON submit: {responses: {FieldTitle: value}, email?: str}"""
-    import re, json
-    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
-        raise HTTPException(404, "Not found")
-    ev = get_event(event_id)
-    if not ev:
-        raise HTTPException(404, "Event not found")
-    if ev.status not in [EventStatus.LIVE, EventStatus.CLOSED]:
-        raise HTTPException(400, f"Registration not open (status: {ev.status})")
-    from .state import count_responses, add_response
-    cnt = count_responses(ev.id)
-    if ev.expected_headcount and cnt >= ev.expected_headcount * 1.5:
-        raise HTTPException(409, "Registration full - capacity reached")
-    responses = payload.get("responses") if isinstance(payload.get("responses"), dict) else payload
-    # sanitize: ensure dict
-    if not isinstance(responses, dict):
-        raise HTTPException(400, "Invalid payload: expected {responses: {Field: value}} or {Field: value}")
-    # Validate required fields
-    import json as _js
-    required = []
-    if ev.form_fields_json:
-        try:
-            fields = _js.loads(ev.form_fields_json)
-            if isinstance(fields, str): fields=_js.loads(fields)
-            for f in fields:
-                if f.get("required"):
-                    required.append(f.get("title"))
-        except: pass
-    for r in required:
-        if not responses.get(r) or not str(responses.get(r)).strip():
-            raise HTTPException(400, f"Missing required field: {r}")
-    email = responses.get("Email") or responses.get("email") or payload.get("email") or ""
-    rid = add_response(ev.id, responses, str(email)[:120])
-    # update cached count
-    try:
-        ev.registrant_count = cnt + 1
-        save_event(ev)
-    except: pass
-    return {"ok": True, "response_id": rid, "event_id": event_id, "count": cnt+1}
-
-@app.get("/events/{event_id}/responses")
-def get_responses(event_id: str, request: Request, user=Depends(get_current_user), limit: int = 100, offset: int = 0, format: str = ""):
-    """Private: club view of native DB responses. Unique link replaces Sheets. Supports ?format=csv."""
-    import re, json, csv, io
-    if not re.match(r'^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{8})$', event_id):
-        raise HTTPException(404, "Not found")
-    ev = get_event(event_id)
-    if not ev:
-        raise HTTPException(404, "Event not found")
-    if user["role"] != "admin" and ev.org.strip().lower() != user["org"].strip().lower():
-        raise HTTPException(403, "Not your club's event")
-    from .state import list_responses, count_responses
-    total = count_responses(ev.id)
-    rows = list_responses(ev.id, limit=min(limit,200), offset=offset)
-    # Build headers from event fields
-    headers=[]
-    if ev.form_fields_json:
-        try:
-            f=_js2=json.loads(ev.form_fields_json)
-            if isinstance(f,str): f=json.loads(f)
-            headers=[x.get("title") for x in f if x.get("title")]
-        except: pass
-    if not headers and rows:
-        headers=list(rows[0]["data"].keys())
-    if format.lower()=="csv":
-        from fastapi.responses import StreamingResponse
-        output=io.StringIO()
-        w=csv.writer(output)
-        w.writerow(["submitted_at","email"]+headers)
-        all_rows = list_responses(ev.id, limit=10000, offset=0)
-        for r in all_rows:
-            w.writerow([r["created_at"], r["respondent_email"]] + [r["data"].get(h,"") for h in headers])
-        output.seek(0)
-        return StreamingResponse(iter([output.getvalue()]), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename=responses_{event_id}.csv"})
-    return {"event_id": event_id, "title": ev.title, "org": ev.org, "total": total, "headers": headers, "rows": rows, "limit": limit, "offset": offset, "native": True}
+# Google Sheets responses are viewed via sheet_link; no native DB routes.
 
 # Helper endpoint to create/update event manually (for testing)
 @app.post("/events")
@@ -1562,9 +1411,7 @@ import pathlib
 
 FRONTEND_DIST = pathlib.Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 
-# Only serve frontend via backend in local dev (when using SQLite). On Render with Neon (prod), frontend is on Vercel, skip to save memory
-from app.config import DATABASE_URL as _FRONT_DB_URL
-_should_serve_frontend = FRONTEND_DIST.exists() and not (_FRONT_DB_URL and _FRONT_DB_URL.strip())
+_should_serve_frontend = FRONTEND_DIST.exists()
 logger.info(f"FRONTEND_DIST = {FRONTEND_DIST}, exists={FRONTEND_DIST.exists()}, index_exists={(FRONTEND_DIST / 'index.html').exists()}, serve_frontend={_should_serve_frontend}")
 
 if _should_serve_frontend:
