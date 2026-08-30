@@ -1,13 +1,29 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 .venv/
 venv/
+env/
+
+# Env & Secrets
 .env
+.env.local
+.env.*.local
 credentials.json
 token.json
 token_*.json
+
+# Database
 events.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
 *.log
-data/*.db
-.env
-.env.local
+logs/
+
+# OS
+.DS_Store

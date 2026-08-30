@@ -1,8 +1,60 @@
-frontend
-.vscode
-.kilo
-.venv*
+# --- OS & Editors ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
-token.json
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+.env
+.env.local
+.env.*.local
+*.log
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
 
+# --- Node / Frontend (if added later) ---
+node_modules/
+dist/
+build/
+.next/
+frontend/dist/
+frontend/node_modules/
+
+# --- Secrets & Local Config ---
 credentials.json
+token.json
+token_*.json
+**/credentials.json
+**/token.json
+**/token_*.json
+*.pem
+*.key
+
+# --- Database ---
+events.db
+**/events.db
+*.db
+*.sqlite
+*.sqlite3
+
+# --- AI / Hackathon tooling ---
+.kilo/
+frontend/
+
+# --- Misc ---
+*.mp4
+*.mov
+!docs/**/*.mp4
